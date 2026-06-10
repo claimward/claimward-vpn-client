@@ -17,9 +17,14 @@ import (
 
 // Session is everything we keep between CLI invocations.
 type Session struct {
-	IDToken      string    `json:"id_token"`
-	AccessToken  string    `json:"access_token"`
-	RefreshToken string    `json:"refresh_token"`
+	// Provider is the auth provider that issued Bearer ("github", "oidc", …).
+	Provider string `json:"provider,omitempty"`
+	// Bearer is the opaque credential sent to the server in the Authorization
+	// header (a GitHub access token or an OIDC ID token, depending on Provider).
+	Bearer string `json:"bearer"`
+	// BearerKind records what Bearer is ("access_token" | "id_token").
+	BearerKind   string    `json:"bearer_kind,omitempty"`
+	RefreshToken string    `json:"refresh_token,omitempty"`
 	Expiry       time.Time `json:"expiry"`
 	// WGPrivateKey is the device's stable WireGuard private key (base64). Kept so
 	// the device keeps the same public key (and assigned IP) across reconnects.
