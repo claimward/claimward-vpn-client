@@ -1,5 +1,7 @@
 # claimward-vpn-client
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/claimward/claimward-vpn-client.svg)](https://pkg.go.dev/github.com/claimward/claimward-vpn-client) [![Go Report Card](https://goreportcard.com/badge/github.com/claimward/claimward-vpn-client)](https://goreportcard.com/report/github.com/claimward/claimward-vpn-client) [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
+
 Shared Go client core **and** the cross-platform CLI for the Claimward VPN.
 
 This module is imported by [`claimward-vpn-server`](https://github.com/claimward/claimward-vpn-server)
