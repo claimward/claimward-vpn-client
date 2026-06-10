@@ -1,0 +1,13 @@
+# Binaries
+/bin/
+/dist/
+claimward
+*.test
+
+# Go
+*.out
+go.work
+go.work.sum
+
+# OS
+.DS_Store
