@@ -46,6 +46,9 @@ type EnrollResponse struct {
 	AllowedIPs []string `json:"allowed_ips"`
 	// DNS servers to use while connected (optional).
 	DNS []string `json:"dns,omitempty"`
+	// GRPCEndpoint is the host:port of the server's RouteService (gRPC), which the
+	// client can Watch for live route updates. Empty disables dynamic routes.
+	GRPCEndpoint string `json:"grpc_endpoint,omitempty"`
 	// PersistentKeepalive in seconds (0 = disabled).
 	PersistentKeepalive int `json:"persistent_keepalive"`
 	// MTU for the tunnel interface (0 = wireguard default).

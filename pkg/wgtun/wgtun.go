@@ -97,6 +97,44 @@ func Up(cfg Config) (*Tunnel, error) {
 // Name returns the OS interface name (e.g. utun5).
 func (t *Tunnel) Name() string { return t.name }
 
+// UpdateRoutes reconfigures the tunnel's routed CIDRs at runtime: it updates the
+// WireGuard peer's AllowedIPs and adds/removes the corresponding OS routes
+// (diffed against the current set). Used to apply route pushes from the server.
+func (t *Tunnel) UpdateRoutes(allowedIPs []string) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "public_key=%s\n", hex.EncodeToString(t.cfg.ServerPublicKey[:]))
+	b.WriteString("replace_allowed_ips=true\n")
+	for _, a := range allowedIPs {
+		fmt.Fprintf(&b, "allowed_ip=%s\n", a)
+	}
+	if err := t.dev.IpcSet(b.String()); err != nil {
+		return fmt.Errorf("update allowed ips: %w", err)
+	}
+
+	old := make(map[string]bool, len(t.cfg.AllowedIPs))
+	for _, a := range t.cfg.AllowedIPs {
+		old[a] = true
+	}
+	want := make(map[string]bool, len(allowedIPs))
+	for _, a := range allowedIPs {
+		want[a] = true
+	}
+	for a := range old {
+		if !want[a] {
+			t.routeDel(a)
+		}
+	}
+	for _, a := range allowedIPs {
+		if !old[a] {
+			if err := t.routeAdd(a); err != nil {
+				return err
+			}
+		}
+	}
+	t.cfg.AllowedIPs = allowedIPs
+	return nil
+}
+
 // Close tears down routes/addresses and stops the device. Best-effort on the
 // network side; always stops the device.
 func (t *Tunnel) Close() error {

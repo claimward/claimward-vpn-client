@@ -12,9 +12,7 @@ import (
 
 // configureNetwork applies addressing/routes on non-darwin platforms.
 //
-// Linux is implemented with `ip`; other platforms are not yet supported and
-// return an explicit error so callers fail loudly rather than silently routing
-// nothing. (The Linux/Windows apps live in their own repos and will refine this.)
+// Linux is implemented with `ip`; other platforms return an explicit error.
 func (t *Tunnel) configureNetwork() error {
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("wgtun: network configuration not implemented for %s", runtime.GOOS)
@@ -30,11 +28,8 @@ func (t *Tunnel) configureNetwork() error {
 		return fmt.Errorf("ip link up: %v: %s", err, out)
 	}
 	for _, cidr := range t.cfg.AllowedIPs {
-		if _, _, perr := net.ParseCIDR(cidr); perr != nil {
-			continue
-		}
-		if out, err := run("ip", "route", "add", cidr, "dev", t.name); err != nil {
-			return fmt.Errorf("ip route add %s: %v: %s", cidr, err, out)
+		if err := t.routeAdd(cidr); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -45,9 +40,28 @@ func (t *Tunnel) teardownNetwork() {
 		return
 	}
 	for _, cidr := range t.cfg.AllowedIPs {
-		if _, _, err := net.ParseCIDR(cidr); err != nil {
-			continue
-		}
+		t.routeDel(cidr)
+	}
+}
+
+func (t *Tunnel) routeAdd(cidr string) error {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	if _, _, err := net.ParseCIDR(cidr); err != nil {
+		return nil
+	}
+	if out, err := run("ip", "route", "add", cidr, "dev", t.name); err != nil {
+		return fmt.Errorf("ip route add %s: %v: %s", cidr, err, out)
+	}
+	return nil
+}
+
+func (t *Tunnel) routeDel(cidr string) {
+	if runtime.GOOS != "linux" {
+		return
+	}
+	if _, _, err := net.ParseCIDR(cidr); err == nil {
 		_, _ = run("ip", "route", "del", cidr, "dev", t.name)
 	}
 }

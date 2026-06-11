@@ -32,6 +32,20 @@ tasks:
     desc: Install the claimward CLI to GOBIN / $GOPATH/bin
     cmds: [go install ./cmd/claimward]
 
+  proto:
+    desc: Regenerate gRPC code from proto/ (protoc via pkgx + Go plugins)
+    cmds:
+      - cmd: |
+          tmp="$(mktemp -d)"
+          GOBIN="$tmp" go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          GOBIN="$tmp" go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          PATH="$tmp:$PATH" pkgx protoc --proto_path=proto \
+            --go_out=. --go_opt=module=github.com/claimward/claimward-vpn-client \
+            --go-grpc_out=. --go-grpc_opt=module=github.com/claimward/claimward-vpn-client \
+            proto/routes/v1/routes.proto
+          echo "regenerated pkg/routespb"
+        silent: true
+
   fmt:
     desc: Format Go sources
     cmds: [gofmt -w .]

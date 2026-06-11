@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package claimward.routes.v1;
+
+option go_package = "github.com/claimward/claimward-vpn-client/pkg/routespb;routespb";
+
+// RouteService streams the set of routes (WireGuard AllowedIPs) a client should
+// send through the tunnel, and pushes updates whenever the server's route set
+// changes — so the gateway can add/remove reachable subnets without the client
+// re-enrolling.
+//
+// The caller authenticates with the same OIDC bearer used for the HTTP API,
+// passed in gRPC metadata as "authorization: Bearer <token>".
+service RouteService {
+  // Watch sends the current RouteUpdate immediately, then streams a new
+  // RouteUpdate every time the route set changes, until the client disconnects.
+  rpc Watch(WatchRequest) returns (stream RouteUpdate);
+}
+
+message WatchRequest {
+  // PublicKey is the device's WireGuard public key (base64), identifying the peer.
+  string public_key = 1;
+}
+
+message RouteUpdate {
+  // AllowedIPs are the destination CIDRs to route through the tunnel.
+  repeated string allowed_ips = 1;
+  // DNS servers to use while connected (optional).
+  repeated string dns = 2;
+  // Serial increments on each change, for client-side de-duplication/logging.
+  uint64 serial = 3;
+}

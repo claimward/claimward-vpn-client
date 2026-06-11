@@ -17,36 +17,40 @@ func (t *Tunnel) configureNetwork() error {
 	if err != nil {
 		return fmt.Errorf("parse address %q: %w", t.cfg.Address, err)
 	}
-
-	// Assign the address (point-to-point, /32 host route on the interface).
 	if out, err := run("ifconfig", t.name, "inet", ip.String(), ip.String(), "netmask", "255.255.255.255"); err != nil {
 		return fmt.Errorf("ifconfig: %v: %s", err, out)
 	}
 	if out, err := run("ifconfig", t.name, "up"); err != nil {
 		return fmt.Errorf("ifconfig up: %v: %s", err, out)
 	}
-
 	for _, cidr := range t.cfg.AllowedIPs {
-		_, dst, perr := net.ParseCIDR(cidr)
-		if perr != nil {
-			continue
-		}
-		// -n numeric, replace any existing route (-q quiet).
-		if out, err := run("route", "-q", "-n", "add", "-inet", dst.String(), "-interface", t.name); err != nil {
-			return fmt.Errorf("route add %s: %v: %s", dst, err, out)
+		if err := t.routeAdd(cidr); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// teardownNetwork removes the routes we added. Best-effort; errors are ignored
-// because the interface is about to disappear with the device anyway.
+// teardownNetwork removes the routes we added. Best-effort.
 func (t *Tunnel) teardownNetwork() {
 	for _, cidr := range t.cfg.AllowedIPs {
-		_, dst, err := net.ParseCIDR(cidr)
-		if err != nil {
-			continue
-		}
+		t.routeDel(cidr)
+	}
+}
+
+func (t *Tunnel) routeAdd(cidr string) error {
+	_, dst, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil // skip malformed
+	}
+	if out, err := run("route", "-q", "-n", "add", "-inet", dst.String(), "-interface", t.name); err != nil {
+		return fmt.Errorf("route add %s: %v: %s", dst, err, out)
+	}
+	return nil
+}
+
+func (t *Tunnel) routeDel(cidr string) {
+	if _, dst, err := net.ParseCIDR(cidr); err == nil {
 		_, _ = run("route", "-q", "-n", "delete", "-inet", dst.String(), "-interface", t.name)
 	}
 }
