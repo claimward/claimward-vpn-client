@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os/exec"
-	"runtime"
 	"strings"
 	"time"
+
+	"github.com/claimward/claimward-vpn-client/pkg/browser"
 )
 
 // githubProvider implements the GitHub OAuth Device Authorization Flow.
@@ -57,7 +57,7 @@ func (p *githubProvider) Login(ctx context.Context, onPrompt func(DevicePrompt))
 	if onPrompt != nil {
 		onPrompt(DevicePrompt{VerificationURI: dc.VerificationURI, UserCode: dc.UserCode, ExpiresIn: dc.ExpiresIn})
 	}
-	_ = openBrowser(dc.VerificationURI) // best effort
+	_ = browser.Open(dc.VerificationURI) // best effort; the UI also shows the URL
 
 	// 2. Poll for the access token.
 	interval := dc.Interval
@@ -125,18 +125,4 @@ func (p *githubProvider) form(ctx context.Context, path string, values url.Value
 	}
 	defer resp.Body.Close()
 	return json.NewDecoder(resp.Body).Decode(out)
-}
-
-func openBrowser(target string) error {
-	var name string
-	var args []string
-	switch runtime.GOOS {
-	case "darwin":
-		name, args = "open", []string{target}
-	case "windows":
-		name, args = "rundll32", []string{"url.dll,FileProtocolHandler", target}
-	default:
-		name, args = "xdg-open", []string{target}
-	}
-	return exec.Command(name, args...).Start()
 }

@@ -13,10 +13,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os/exec"
-	"runtime"
 	"time"
 
+	"github.com/claimward/claimward-vpn-client/pkg/browser"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 )
@@ -28,6 +27,10 @@ type Config struct {
 	ClientSecret string   // usually empty for native clients
 	Scopes       []string // defaults to openid, profile, email, offline_access
 	RedirectPort int      // 0 = pick a free loopback port
+	// OnAuthURL, if set, is called with the authorization URL before the browser
+	// is opened — so a UI can surface it (e.g. an "Open sign-in page" button) in
+	// case the automatic browser launch fails.
+	OnAuthURL func(string)
 }
 
 // Tokens is the set of tokens returned by a successful login.
@@ -108,7 +111,10 @@ func Login(ctx context.Context, cfg Config) (*Tokens, error) {
 	go srv.Serve(ln) //nolint:errcheck // closed via defer
 	defer srv.Close()
 
-	if err := openBrowser(authURL); err != nil {
+	if cfg.OnAuthURL != nil {
+		cfg.OnAuthURL(authURL)
+	}
+	if err := browser.Open(authURL); err != nil {
 		fmt.Printf("Could not open a browser automatically. Open this URL to sign in:\n\n%s\n\n", authURL)
 	}
 
@@ -133,20 +139,6 @@ func randString(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b)
-}
-
-func openBrowser(url string) error {
-	var name string
-	var args []string
-	switch runtime.GOOS {
-	case "darwin":
-		name, args = "open", []string{url}
-	case "windows":
-		name, args = "rundll32", []string{"url.dll,FileProtocolHandler", url}
-	default:
-		name, args = "xdg-open", []string{url}
-	}
-	return exec.Command(name, args...).Start()
 }
 
 const successHTML = `<!doctype html>
