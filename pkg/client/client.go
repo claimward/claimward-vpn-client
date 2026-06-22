@@ -35,13 +35,22 @@ func New(baseURL string) *Client {
 
 // Enroll registers the device's public key and returns the tunnel parameters.
 // idToken is the OIDC ID token obtained from the oidc package.
-func (c *Client) Enroll(ctx context.Context, idToken string, pub wgtypes.Key, dev protocol.DeviceInfo) (*protocol.EnrollResponse, error) {
-	req := protocol.EnrollRequest{PublicKey: pub.String(), Device: dev}
+func (c *Client) Enroll(ctx context.Context, idToken string, pub wgtypes.Key, dev protocol.DeviceInfo, tenant string) (*protocol.EnrollResponse, error) {
+	req := protocol.EnrollRequest{PublicKey: pub.String(), Device: dev, Tenant: tenant}
 	var resp protocol.EnrollResponse
 	if err := c.do(ctx, http.MethodPost, protocol.PathEnroll, idToken, req, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// Tenants returns the tenants the authenticated user may connect to.
+func (c *Client) Tenants(ctx context.Context, idToken string) ([]protocol.TenantInfo, error) {
+	var resp []protocol.TenantInfo
+	if err := c.do(ctx, http.MethodGet, protocol.PathTenants, idToken, nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 // Heartbeat renews the lease for an enrolled peer.

@@ -13,8 +13,15 @@ const (
 	PathEnroll     = "/api/v1/enroll"
 	PathHeartbeat  = "/api/v1/heartbeat"
 	PathDeregister = "/api/v1/deregister"
+	PathTenants    = "/api/v1/tenants"
 	PathHealthz    = "/healthz"
 )
+
+// TenantInfo identifies a tenant the authenticated user may connect to.
+type TenantInfo struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
 
 // EnrollRequest is sent by a client to obtain a WireGuard tunnel configuration.
 //
@@ -25,6 +32,9 @@ type EnrollRequest struct {
 	PublicKey string `json:"public_key"`
 	// Device describes the enrolling device, for audit and display in the admin UI.
 	Device DeviceInfo `json:"device"`
+	// Tenant is the ID of the tenant the user chose to connect to. The user must
+	// be a member of it. Empty lets the server pick when the user has exactly one.
+	Tenant string `json:"tenant,omitempty"`
 }
 
 // DeviceInfo identifies the device performing an enrollment.
