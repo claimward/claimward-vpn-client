@@ -1,13 +1,10 @@
-# Taskfile for claimward-vpn-client (shared library + the `claimward` CLI).
+# Taskfile for claimward-vpn-client (shared Go client library — no binary).
+# The runnable apps live in the platform repos (claimward-vpn-app-osx, ...).
 # Install go-task: https://taskfile.dev   (pkgx install task)
 #
-#   task build      # build ./bin/claimward
-#   task install    # go install the CLI onto your PATH
+#   task build      # compile all packages
+#   task test       # run the tests
 version: "3"
-
-vars:
-  CLI: claimward
-  BIN: bin
 
 tasks:
   default:
@@ -20,17 +17,11 @@ tasks:
     cmds: [go mod download]
 
   build:
-    desc: Build the claimward CLI
+    desc: Compile all library packages
     cmds:
-      - go build -o {{.BIN}}/{{.CLI}} ./cmd/claimward
+      - go build ./...
     sources:
       - "**/*.go"
-    generates:
-      - "{{.BIN}}/{{.CLI}}"
-
-  install:
-    desc: Install the claimward CLI to GOBIN / $GOPATH/bin
-    cmds: [go install ./cmd/claimward]
 
   proto:
     desc: Regenerate gRPC code from proto/ (protoc via pkgx + Go plugins)
@@ -61,8 +52,3 @@ tasks:
   test:
     desc: Run tests
     cmds: [go test ./...]
-
-  clean:
-    desc: Remove build artifacts
-    cmds:
-      - rm -rf {{.BIN}}
