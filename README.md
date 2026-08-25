@@ -1,6 +1,5 @@
 # claimward-vpn-client
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/claimward/claimward-vpn-client.svg)](https://pkg.go.dev/github.com/claimward/claimward-vpn-client) [![Go Report Card](https://goreportcard.com/badge/github.com/claimward/claimward-vpn-client)](https://goreportcard.com/report/github.com/claimward/claimward-vpn-client) [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
 
 The shared Go **client library** for the Claimward VPN: sign-in, the enrollment
 wire protocol, the userspace WireGuard tunnel, and the live route-push client.
