@@ -17,7 +17,7 @@ library they share.
 | Package | Purpose |
 |---------|---------|
 | `pkg/protocol` | Wire contract (`/enroll`, `/heartbeat`, `/deregister`) — the single source of truth shared with the server |
-| `pkg/auth` | Interactive sign-in behind a pluggable `Provider`: **GitHub** device-authorization flow (default) or **OIDC** Authorization Code + PKCE. Returns the bearer `Token` sent to the server |
+| `pkg/auth` | Interactive sign-in behind a pluggable `Provider`: **GitHub** device-authorization flow (default), **OIDC** Authorization Code + PKCE, or **go-authn** device flow, whose provider also registers the device's WireGuard key (`KeyRegistrar`). Returns the bearer `Token` sent to the server |
 | `pkg/oidc` | The OIDC Authorization Code + PKCE flow (issuer discovery, loopback redirect capture) used by the `oidc` auth provider |
 | `pkg/browser` | Opens a URL in the user's default browser using absolute opener paths, so it works from GUI apps launched by LaunchServices |
 | `pkg/client` | High-level client: `Enroll`/`Heartbeat`/`Deregister`/`Tenants` against the server, plus `TunnelConfig` to turn an `EnrollResponse` into a `wgtun.Config` |
@@ -79,6 +79,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// With go-authn, the PUBLIC key is registered at the provider first, and
+	// the token for the server is the one RegisterKey returns. Keep its
+	// Refresh: the provider rotates refresh tokens.
+	if reg, ok := provider.(auth.KeyRegistrar); ok {
+		if tok, err = reg.RegisterKey(ctx, tok, keys.Public.String(), "laptop"); err != nil {
+			log.Fatal(err)
+		}
+	}
 	c := client.New("https://vpn.example.com")
 	resp, err := c.Enroll(ctx, tok.Value, keys.Public,
 		protocol.DeviceInfo{Name: "laptop", OS: "darwin", Platform: "cli"}, "")
@@ -103,6 +111,32 @@ func main() {
 	}
 }
 ```
+
+## With go-authn
+
+`Provider: "go-authn"`, with `OIDCIssuer` and `OIDCClientID`, signs in at a
+[go-authn](https://github.com/go-authn/bridge) provider: an OpenID Connect
+provider in front of a SAML federation such as RENATER or eduGAIN, which also
+keeps **whose each WireGuard key is**. claimward-vpn-server then enrolls a key
+only if its owner registered it there (`AUTH_PROVIDER=go-authn` on the
+server). The flow is:
+
+1. `Login`: the device flow, scope `openid wireguard`. The token opens the
+   provider's key registry and nothing else; a go-authn provider addresses
+   such a token to itself alone;
+2. `RegisterKey` (the `KeyRegistrar` interface):
+   - registers the device's **public** key (`POST /wireguard/key`), renewing it
+     when it is already the person's;
+   - then refreshes asking for `openid` alone (RFC 6749 §6), which gives the
+     token for claimward-vpn-server;
+   - when the sign-in token has lapsed, it first refreshes with no scope, which
+     asks for everything granted;
+   - it returns the rotated refresh token, which replaces the old one, since
+     the old one is spent;
+3. `Enroll` with that token.
+
+The private key never leaves the device. The provider's client needs
+`wireguard_keys = true` and a `refresh_lifetime`.
 
 ## Notes
 
