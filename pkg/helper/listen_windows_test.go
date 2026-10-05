@@ -80,15 +80,36 @@ func TestListenSecuresTheDirectoryAndTheSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Compared as Windows renders them, owner and DACL: the read-back
+	// spells a well-known group by its alias (BU) and marks the DACL
+	// auto-inherited (AI), so the strings are normalised through Windows'
+	// own parser rather than compared to what this package wrote.
+	render := func(sddl string) string {
+		sd, err := windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sd.String()
+	}
+	ownerAndDACL := func(s string) (string, string) {
+		d := s[strings.Index(s, "D:"):]
+		o := s[:strings.Index(s, "D:")]
+		if i := strings.Index(o, "G:"); i >= 0 {
+			o = o[:i]
+		}
+		d = strings.Replace(d, "D:PAI", "D:P", 1)
+		return o, d
+	}
 	for path, want := range map[string]string{dir: dirSDDL(users.String()), sock: socketSDDL(users.String())} {
 		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
 			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 		if err != nil {
 			t.Fatal(err)
 		}
-		got := sd.String()
-		if !strings.HasPrefix(got, "O:SY") || !strings.Contains(got, "D:P") || !strings.Contains(got, users.String()) {
-			t.Errorf("%s: %s, want the shape of %s", path, got, want)
+		gotO, gotD := ownerAndDACL(sd.String())
+		wantO, wantD := ownerAndDACL(render(want))
+		if gotO != wantO || gotD != wantD {
+			t.Errorf("%s:\n got %s%s\nwant %s%s", path, gotO, gotD, wantO, wantD)
 		}
 	}
 	go func() {
