@@ -98,6 +98,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item (Join-Path $env:RUNNER_TEMP 'wintun\bin\amd64\wintun.dll') bin\
           $env:CLAIMWARD_WINTUN_TEST = '1'
-          .\bin\wgtun.test.exe -test.run Wintun -test.v | Tee-Object -FilePath wintun.txt
+          .\bin\wgtun.test.exe '-test.run=Wintun' '-test.v' | Tee-Object -FilePath wintun.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (Select-String -Path wintun.txt -SimpleMatch -Pattern '--- SKIP') { throw 'the Wintun test was skipped' }
