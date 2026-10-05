@@ -16,7 +16,7 @@ library they share.
 
 | Package | Purpose |
 |---------|---------|
-| `pkg/protocol` | Wire contract (`/enroll`, `/heartbeat`, `/deregister`) — the single source of truth shared with the server |
+| `pkg/protocol` | Wire contract (`/enroll`, `/heartbeat`, `/deregister`, `/tenants`) — the single source of truth shared with the server |
 | `pkg/auth` | Interactive sign-in behind a pluggable `Provider`: **GitHub** device-authorization flow (default), **OIDC** Authorization Code + PKCE, or **go-authn** device flow, whose provider also registers the device's WireGuard key (`KeyRegistrar`). Returns the bearer `Token` sent to the server |
 | `pkg/oidc` | The OIDC Authorization Code + PKCE flow (issuer discovery, loopback redirect capture) used by the `oidc` auth provider |
 | `pkg/browser` | Opens a URL in the user's default browser using absolute opener paths, so it works from GUI apps launched by LaunchServices |
@@ -28,17 +28,18 @@ library they share.
 | `pkg/appcore` | The app's business logic, shared by the macOS, Linux and Windows apps: sign-in, the **tenant chosen for the session**, connect/disconnect through the helper, status for the UI |
 | `pkg/helper` | The privileged helper (root / SYSTEM), shared by the three apps: enrolls, owns the tunnel, watches route pushes. Each app's helper binary is a `main` that loads its configuration and listens |
 | `pkg/hproto`, `pkg/helperclient` | The helper's socket protocol and the app's client for it |
-| `pkg/tokenstore` | 0600 on-disk session store (auth tokens + device key); the macOS app graduates this to the Keychain |
+| `pkg/tokenstore` | 0600 on-disk session store (auth tokens, device key, chosen tenant), used by `pkg/appcore` in all three apps |
 
 ## Architecture (end to end)
 
 ```
-app  --auth Provider-->  IdP              (GitHub device flow / OIDC PKCE → bearer token)
-app  --POST /enroll (Bearer token, wg pubkey)-->  server
+app     --auth Provider-->  IdP          (GitHub device flow / OIDC PKCE / go-authn device flow → bearer token)
+app     --connect (bearer, device key, tenant) over the helper socket-->  helper (root / SYSTEM)
+helper  --POST /enroll (Bearer token, wg pubkey, tenant)-->  server  (only a server named in helper.json)
 server  --wgctrl-->  wg0 kernel iface     (adds peer, allocates IP)
-app  <--assigned IP, server pubkey, endpoint, routes--  server
-app  --wireguard-go-->  utunN             (tunnel up)
-app  --gRPC RouteService.Watch-->  server (optional: live route updates)
+helper  <--assigned IP, server pubkey, endpoint, the tenant's routes + DNS--  server
+helper  --wireguard-go-->  utunN / utun / Wintun "Claimward"   (tunnel up)
+helper  --gRPC RouteService.Watch (TLS)-->  server (optional: live route updates)
 ```
 
 ## Library usage
@@ -204,12 +205,31 @@ A person may belong to several tenants and chooses one per session.
 - **`Connect`** enrolls into that tenant. A person in several who has not
   chosen gets `ErrTenantRequired`, with the tenants in `Status()`.
 
+## App configuration
+
+`pkg/appcore` reads `config.json` under `os.UserConfigDir()/Claimward/`
+(`~/Library/Application Support` on macOS, `~/.config` on Linux, `%AppData%`
+on Windows), then these environment overrides:
+
+| Key | Environment | Notes |
+|---|---|---|
+| `server_url` | `CLAIMWARD_SERVER` | required; must also be listed in the helper's `servers` |
+| `provider` | `CLAIMWARD_AUTH_PROVIDER` | `github` (default), `oidc` or `go-authn` |
+| `github_client_id` | `CLAIMWARD_GITHUB_CLIENT_ID` | required for `github` |
+| `oidc_issuer` | `CLAIMWARD_OIDC_ISSUER` | required for `oidc` and `go-authn` |
+| `oidc_client_id` | `CLAIMWARD_OIDC_CLIENT_ID` | required for `oidc` and `go-authn` |
+| `socket_path` | `CLAIMWARD_HELPER_SOCKET` | default `/var/run/claimward-helper.sock`, `C:\ProgramData\Claimward\helper.sock` on Windows |
+
+The helper's own `helper.json` takes `servers` (required), `group` (default
+`admin` on macOS, `claimward` on Linux, `Claimward Users` on Windows) and
+`socket`.
+
 ## Notes
 
 - The session store (`pkg/tokenstore`) is a 0600 JSON file under the user's
-  config dir. The macOS app graduates this to the Keychain.
+  config dir (`os.UserConfigDir()`), on every platform.
 - Creating the tun device and changing routes (`pkg/wgtun`) require elevated
-  privileges; the macOS app delegates this to its privileged helper.
+  privileges; each app delegates this to its privileged helper (`pkg/helper`).
 - `pkg/wgtun` implements macOS, Linux and Windows. On Windows the device is a
   **Wintun** adapter named `Claimward`: `wintun.dll` (https://www.wintun.net,
   signed by WireGuard LLC) must sit beside the executable that calls
