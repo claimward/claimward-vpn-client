@@ -25,6 +25,9 @@ library they share.
 | `pkg/wgtun` | Userspace WireGuard tunnel via `wireguard-go` (+ darwin/linux interface & route setup); needs elevated privileges |
 | `pkg/routeclient` | Watches the server's RouteService (gRPC) and reports live route updates without re-enrolling |
 | `pkg/routespb` | Generated gRPC/protobuf stubs for the RouteService (shared with the server) |
+| `pkg/appcore` | The app's business logic, shared by the macOS, Linux and Windows apps: sign-in, the **tenant chosen for the session**, connect/disconnect through the helper, status for the UI |
+| `pkg/helper` | The privileged helper (root / SYSTEM), shared by the three apps: enrolls, owns the tunnel, watches route pushes. Each app's helper binary is a `main` that loads its configuration and listens |
+| `pkg/hproto`, `pkg/helperclient` | The helper's socket protocol and the app's client for it |
 | `pkg/tokenstore` | 0600 on-disk session store (auth tokens + device key); the macOS app graduates this to the Keychain |
 
 ## Architecture (end to end)
@@ -137,6 +140,47 @@ server). The flow is:
 
 The private key never leaves the device. The provider's client needs
 `wireguard_keys = true` and a `refresh_lifetime`.
+
+## The privileged helper
+
+The helper runs as root (or SYSTEM). Any process that can reach its socket can
+make it act, so what it does is bounded by **its own** configuration, never by
+the request:
+
+- **It enrolls only with a server its configuration names.** A helper that
+  took the server from the request would let any local process point it at a
+  server of its own, answering with routes for `0.0.0.0/0`: every packet of
+  the machine, sent where that process chose.
+- **It takes no tunnel configuration from a request.** The tunnel is what that
+  server answered. The earlier `up` and `update-routes` actions, which took
+  one, are gone.
+- **Its socket is `0660`**, owned by root and one group (`admin` on macOS,
+  `claimward` on Linux), in a directory only root can write. The earlier
+  helper's socket was `0666`.
+- **Its configuration must be root's**, and writable by root alone, or the
+  helper does not start.
+
+```json
+{
+  "servers": ["https://vpn.example.org"],
+  "group": "claimward"
+}
+```
+
+A route watch (`pkg/routeclient`) carries the bearer token, so it runs over
+**TLS** except to a loopback address. Against a server whose gRPC is not TLS,
+the handshake fails before the token is sent, and the tunnel stays up
+without live route updates.
+
+## Tenants
+
+A person may belong to several tenants and chooses one per session.
+`appcore.Core`:
+- **`Tenants`** asks the server, through the helper, which tenants the person
+  may join;
+- **`SetTenant`** records the choice in the session; a new sign-in forgets it;
+- **`Connect`** enrolls into that tenant. A person in several who has not
+  chosen gets `ErrTenantRequired`, with the tenants in `Status()`.
 
 ## Notes
 
