@@ -199,7 +199,8 @@ without live route updates.
 
 The server removes a peer whose lease ends (`LEASE_TTL`, 24 h by default).
 While the tunnel is up the helper renews it (`POST /api/v1/heartbeat`) at half
-of what the lease has left, between 30 s and an hour, and acts on the answer:
+of what the lease has left, between 30 s and 10 minutes (the longest a device
+stays cut off after the server restarts), and acts on the answer:
 
 | The server answers | The helper |
 |---|---|

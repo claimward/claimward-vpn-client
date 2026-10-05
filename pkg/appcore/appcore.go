@@ -59,9 +59,10 @@ type Core struct {
 
 // renewDelay brings a fresh bearer at 40% of what the lease has left: before
 // the helper would renew on its own (at half), with the bearer it holds,
-// which may have expired since. Never sooner than 20 s nor later than 50 min.
+// which may have expired since. Never sooner than 20 s nor later than 8 min,
+// which is before the helper's own ceiling (10 min).
 func renewDelay(remaining time.Duration) time.Duration {
-	return min(max(remaining*2/5, 20*time.Second), 50*time.Minute)
+	return min(max(remaining*2/5, 20*time.Second), 8*time.Minute)
 }
 
 // logf appends a timestamped line to the connection log shown in the UI.

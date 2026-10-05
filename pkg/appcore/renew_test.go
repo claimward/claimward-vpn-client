@@ -2,6 +2,8 @@ package appcore
 
 import (
 	"context"
+
+	"github.com/claimward/claimward-vpn-client/pkg/helper"
 	"testing"
 	"time"
 )
@@ -106,9 +108,16 @@ func TestARestartedAppRenewsATunnelItDidNotBringUp(t *testing.T) {
 }
 
 func TestAppRenewalTiming(t *testing.T) {
+	// The app brings a fresh bearer before the helper renews with a stale
+	// one, at every lease length.
+	for left := time.Second; left < 48*time.Hour; left = left*3/2 + time.Second {
+		if a, h := renewDelay(left), helper.RenewDelay(left); a >= h {
+			t.Errorf("lease %v left: the app renews after %v, the helper after %v", left, a, h)
+		}
+	}
 	for _, c := range []struct{ left, want time.Duration }{
-		{24 * time.Hour, 50 * time.Minute},
-		{50 * time.Minute, 20 * time.Minute},
+		{24 * time.Hour, 8 * time.Minute},
+		{10 * time.Minute, 4 * time.Minute},
 		{10 * time.Second, 20 * time.Second},
 	} {
 		if got := renewDelay(c.left); got != c.want {

@@ -391,8 +391,8 @@ func TestASupersededReEnrollmentGivesWay(t *testing.T) {
 // that gives no lease is renewed at the longest interval.
 func TestRenewalTiming(t *testing.T) {
 	for _, c := range []struct{ left, want time.Duration }{
-		{24 * time.Hour, time.Hour},
-		{40 * time.Minute, 20 * time.Minute},
+		{24 * time.Hour, 10 * time.Minute},
+		{16 * time.Minute, 8 * time.Minute},
 		{10 * time.Second, 30 * time.Second},
 		{-time.Minute, 30 * time.Second},
 	} {
