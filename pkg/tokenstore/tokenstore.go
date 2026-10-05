@@ -29,6 +29,9 @@ type Session struct {
 	// WGPrivateKey is the device's stable WireGuard private key (base64). Kept so
 	// the device keeps the same public key (and assigned IP) across reconnects.
 	WGPrivateKey string `json:"wg_private_key,omitempty"`
+	// Tenant is the tenant chosen for this session, for a person who
+	// belongs to several. Empty lets the server use the person's only one.
+	Tenant string `json:"tenant,omitempty"`
 }
 
 // Path returns the on-disk location of the session file.
