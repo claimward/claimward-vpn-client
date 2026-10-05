@@ -9,6 +9,9 @@
 //   - github (default): a GitHub OAuth access token, obtained via the Device
 //     Authorization Flow (no client secret, ideal for native/CLI clients).
 //   - oidc: an OIDC ID token, obtained via Authorization Code + PKCE.
+//   - go-authn: an access token from a go-authn provider (go-authn/bridge),
+//     obtained via the device flow; the device's WireGuard key is registered
+//     there first (KeyRegistrar), and the server checks that it was.
 //
 // Add a provider by implementing Provider and wiring it into New.
 package auth
@@ -16,6 +19,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 )
 
@@ -54,16 +58,19 @@ type Provider interface {
 
 // Config selects and configures a Provider.
 type Config struct {
-	Provider string // "github" (default) | "oidc"
+	Provider string // "github" (default) | "oidc" | "go-authn"
 
 	// GitHub
 	GitHubClientID string
 	GitHubBaseURL  string // default https://github.com (set for GHE)
 	GitHubScopes   []string
 
-	// OIDC
+	// OIDC, and go-authn
 	OIDCIssuer   string
 	OIDCClientID string
+
+	// HTTPClient, if set, is used for go-authn's requests.
+	HTTPClient *http.Client
 }
 
 // New builds the configured Provider.
@@ -87,7 +94,16 @@ func New(cfg Config) (Provider, error) {
 			return nil, fmt.Errorf("oidc provider requires issuer and client id")
 		}
 		return &oidcProvider{issuer: cfg.OIDCIssuer, clientID: cfg.OIDCClientID}, nil
+	case "go-authn":
+		if cfg.OIDCIssuer == "" || cfg.OIDCClientID == "" {
+			return nil, fmt.Errorf("go-authn provider requires issuer and client id")
+		}
+		hc := cfg.HTTPClient
+		if hc == nil {
+			hc = &http.Client{Timeout: 30 * time.Second}
+		}
+		return &goauthnProvider{issuer: cfg.OIDCIssuer, clientID: cfg.OIDCClientID, hc: hc}, nil
 	default:
-		return nil, fmt.Errorf("unknown auth provider %q (want \"github\" or \"oidc\")", cfg.Provider)
+		return nil, fmt.Errorf("unknown auth provider %q (want \"github\", \"oidc\" or \"go-authn\")", cfg.Provider)
 	}
 }
