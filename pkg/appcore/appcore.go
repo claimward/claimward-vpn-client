@@ -142,13 +142,19 @@ func (c *Core) Status() Status {
 		if hresp, err := helper.Status(); err == nil {
 			st.Connected = hresp.Connected
 			st.Interface = hresp.Interface
+			if hresp.Connected {
+				// The helper knows the address it was given; this Core knows
+				// it only if it made the connection itself, which an app
+				// restarted under a running tunnel did not.
+				st.AssignedIP = hresp.AssignedIP
+			}
 			if hresp.Connected && hresp.Tenant != "" {
 				st.Tenant = hresp.Tenant
 			}
 		}
 	}
 	c.mu.Lock()
-	if st.Connected {
+	if st.Connected && st.AssignedIP == "" {
 		st.AssignedIP = c.assigned
 	}
 	st.Tenants = append([]hproto.Tenant(nil), c.tenants...)
