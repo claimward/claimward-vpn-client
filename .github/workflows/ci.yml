@@ -44,3 +44,60 @@ jobs:
           go-version: '1.27.1'
       - run: CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.goarch }} go build ./...
 
+
+  crossbuild-windows:
+    name: cross-build (windows/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.1'
+      - run: CGO_ENABLED=0 GOOS=windows GOARCH=${{ matrix.goarch }} go build ./...
+      - run: CGO_ENABLED=0 GOOS=windows GOARCH=${{ matrix.goarch }} go vet ./...
+      - run: CGO_ENABLED=0 GOOS=windows GOARCH=${{ matrix.goarch }} go test -c -o /dev/null ./pkg/helper
+      - run: CGO_ENABLED=0 GOOS=windows GOARCH=${{ matrix.goarch }} go test -c -o /dev/null ./pkg/wgtun
+
+  # The Windows parts run on Windows: the helper's ACLs set and read back
+  # through the file system, and a real Wintun adapter brought up and its
+  # address, routes, DNS and MTU read back from the IP Helper API. The
+  # runner is elevated, which both need.
+  windows:
+    name: windows (tests, ACLs, Wintun)
+    runs-on: windows-latest
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.1'
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+      - name: Helper ACL tests (a skip is a failure here)
+        shell: pwsh
+        run: |
+          go test -count=1 -v -run 'Listen|Configuration|SocketGroup' ./pkg/helper | Tee-Object -FilePath acl.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (Select-String -Path acl.txt -SimpleMatch -Pattern '--- SKIP') { throw 'an ACL test was skipped' }
+      - name: Wintun adapter test
+        shell: pwsh
+        run: |
+          # wintun.dll is WireGuard LLC's signed build, pinned by hash.
+          $zip = Join-Path $env:RUNNER_TEMP 'wintun-0.14.1.zip'
+          Invoke-WebRequest -Uri 'https://www.wintun.net/builds/wintun-0.14.1.zip' -OutFile $zip
+          $sum = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+          if ($sum -ne '07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51') { throw "wintun zip SHA-256 is $sum" }
+          Expand-Archive -Path $zip -DestinationPath $env:RUNNER_TEMP -Force
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          go test -c -o bin\wgtun.test.exe ./pkg/wgtun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item (Join-Path $env:RUNNER_TEMP 'wintun\bin\amd64\wintun.dll') bin\
+          $env:CLAIMWARD_WINTUN_TEST = '1'
+          .\bin\wgtun.test.exe -test.run Wintun -test.v | Tee-Object -FilePath wintun.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (Select-String -Path wintun.txt -SimpleMatch -Pattern '--- SKIP') { throw 'the Wintun test was skipped' }

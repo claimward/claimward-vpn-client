@@ -64,7 +64,7 @@ func Up(cfg Config) (*Tunnel, error) {
 	if mtu == 0 {
 		mtu = device.DefaultMTU
 	}
-	tunDev, err := tun.CreateTUN("utun", mtu)
+	tunDev, err := tun.CreateTUN(tunName, mtu)
 	if err != nil {
 		return nil, fmt.Errorf("create tun device (need root?): %w", err)
 	}

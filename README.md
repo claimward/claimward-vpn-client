@@ -22,7 +22,7 @@ library they share.
 | `pkg/browser` | Opens a URL in the user's default browser using absolute opener paths, so it works from GUI apps launched by LaunchServices |
 | `pkg/client` | High-level client: `Enroll`/`Heartbeat`/`Deregister`/`Tenants` against the server, plus `TunnelConfig` to turn an `EnrollResponse` into a `wgtun.Config` |
 | `pkg/wgkey` | WireGuard key generation / parsing |
-| `pkg/wgtun` | Userspace WireGuard tunnel via `wireguard-go` (+ darwin/linux interface & route setup); needs elevated privileges |
+| `pkg/wgtun` | Userspace WireGuard tunnel via `wireguard-go` (+ interface, route and DNS setup: darwin and Linux with their tools, Windows on a Wintun adapter through `winipcfg`); needs elevated privileges |
 | `pkg/routeclient` | Watches the server's RouteService (gRPC) and reports live route updates without re-enrolling |
 | `pkg/routespb` | Generated gRPC/protobuf stubs for the RouteService (shared with the server) |
 | `pkg/appcore` | The app's business logic, shared by the macOS, Linux and Windows apps: sign-in, the **tenant chosen for the session**, connect/disconnect through the helper, status for the UI |
@@ -160,6 +160,28 @@ the request:
 - **Its configuration must be root's**, and writable by root alone, or the
   helper does not start.
 
+On **Windows** the same rules are ACLs, which the helper sets and reads back
+itself rather than trusting an installer to have done it:
+
+- the socket's directory, `C:\ProgramData\Claimward`, gets a **protected**
+  DACL (nothing inherited from ProgramData, which lets every user create files
+  there): SYSTEM and Administrators in full control, the socket's group allowed
+  to list and traverse it and nothing more. It is created already carrying
+  that DACL, and a directory that is a junction or a link is refused;
+- the socket gets its own DACL: SYSTEM and Administrators, and the group
+  allowed to connect (read/write);
+- the group is the local group **`Claimward Users`** (the app's installer
+  creates it and adds the person). If it does not exist the socket is opened
+  to **INTERACTIVE** — everybody logged on at the machine, console or Remote
+  Desktop — and the helper logs that it did;
+- `helper.json` must be **owned by SYSTEM or Administrators, and writable by
+  nobody else**: the helper reads the file's owner and DACL and refuses any
+  allow entry that grants write, append, delete, `WRITE_DAC`, `WRITE_OWNER`
+  or generic write/all to another SID, and a null DACL.
+
+The rules themselves (`pkg/helper/acl.go`) are pure functions, tested on every
+platform; the Windows CI job applies them to real files and reads them back.
+
 ```json
 {
   "servers": ["https://vpn.example.org"],
@@ -188,9 +210,14 @@ A person may belong to several tenants and chooses one per session.
   config dir. The macOS app graduates this to the Keychain.
 - Creating the tun device and changing routes (`pkg/wgtun`) require elevated
   privileges; the macOS app delegates this to its privileged helper.
-- `pkg/wgtun` implements macOS and Linux; Windows lives in the app repo.
-- DNS push from the server is carried in the protocol but not yet applied by
-  `wgtun` — TODO.
+- `pkg/wgtun` implements macOS, Linux and Windows. On Windows the device is a
+  **Wintun** adapter named `Claimward`: `wintun.dll` (https://www.wintun.net,
+  signed by WireGuard LLC) must sit beside the executable that calls
+  `wgtun.Up`, which the Windows app's packaging takes care of. Address,
+  routes, DNS and MTU are set through `winipcfg` (the IP Helper API, pure Go,
+  `CGO_ENABLED=0`), as WireGuard for Windows does.
+- DNS push from the server is applied on Windows; on macOS and Linux it is
+  carried in the protocol but not yet applied by `wgtun` — TODO.
 
 ## License
 
