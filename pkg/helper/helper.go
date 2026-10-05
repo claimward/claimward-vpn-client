@@ -128,10 +128,19 @@ type session struct {
 
 // renewDelay renews at half of what the lease has left -- so a renewal
 // that fails has the other half to be retried in -- and never sooner than
-// 30 s nor later than an hour.
+// 30 s nor later than 10 min. The ceiling is how long a device stays cut off
+// after the server restarts: the server removes the peers it no longer
+// knows, and the device learns it at its next renewal (404) and enrolls
+// again.
 func renewDelay(remaining time.Duration) time.Duration {
-	return min(max(remaining/2, 30*time.Second), time.Hour)
+	return min(max(remaining/2, 30*time.Second), maxRenewDelay)
 }
+
+const maxRenewDelay = 10 * time.Minute
+
+// RenewDelay is when the helper renews a lease with remaining left: for an
+// app that must bring a fresh bearer before then.
+func RenewDelay(remaining time.Duration) time.Duration { return renewDelay(remaining) }
 
 // New is a helper for the platform os ("darwin", "linux", "windows") and app
 // ("app-osx", ...), as the server's admin sees the device.
