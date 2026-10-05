@@ -155,3 +155,24 @@ func TestNotSignedIn(t *testing.T) {
 		t.Error("chose a tenant without a session")
 	}
 }
+
+// An app that restarts while the tunnel is up still shows the address: it is
+// the helper's to report, not only the memory of the Core that connected.
+func TestTheAddressSurvivesAnAppRestart(t *testing.T) {
+	c, _ := world(t)
+	if _, err := c.Tenants(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetTenant("hpc"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	restarted := New(&Config{ServerURL: c.Config().ServerURL, Provider: "oidc", OIDCIssuer: "https://login.example.org",
+		OIDCClientID: "claimward", SocketPath: c.Config().SocketPath})
+	st := restarted.Status()
+	if !st.Connected || st.AssignedIP != "10.80.0.7/32" || st.Interface != "utun9" {
+		t.Fatalf("after a restart: connected %v address %q interface %q", st.Connected, st.AssignedIP, st.Interface)
+	}
+}
