@@ -69,6 +69,22 @@ func (c *Client) Deregister(ctx context.Context, idToken string, pub wgtypes.Key
 	return c.do(ctx, http.MethodPost, protocol.PathDeregister, idToken, req, nil)
 }
 
+// ServerError is a non-2xx answer from the server: its HTTP status and, when
+// the body is a protocol.ErrorResponse, its code ("not_enrolled",
+// "tenant_required", ...).
+type ServerError struct {
+	Status  int
+	Code    string
+	Message string
+}
+
+func (e *ServerError) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("server %d: %s: %s", e.Status, e.Code, e.Message)
+	}
+	return fmt.Sprintf("server %d: %s", e.Status, e.Message)
+}
+
 // TunnelConfig converts an EnrollResponse plus the device private key into a
 // wgtun.Config ready to hand to wgtun.Up.
 func TunnelConfig(resp *protocol.EnrollResponse, priv wgtypes.Key) (wgtun.Config, error) {
@@ -115,11 +131,14 @@ func (c *Client) do(ctx context.Context, method, path, bearer string, body, out 
 
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode/100 != 2 {
+		se := &ServerError{Status: resp.StatusCode}
 		var e protocol.ErrorResponse
 		if json.Unmarshal(data, &e) == nil && e.Error != "" {
-			return fmt.Errorf("server %d: %s: %s", resp.StatusCode, e.Error, e.Message)
+			se.Code, se.Message = e.Error, e.Message
+		} else {
+			se.Message = strings.TrimSpace(string(data))
 		}
-		return fmt.Errorf("server %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return se
 	}
 	if out != nil {
 		if err := json.Unmarshal(data, out); err != nil {

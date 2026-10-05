@@ -49,6 +49,19 @@ type Core struct {
 	devCode string
 	// log is a capped ring of timestamped connection-process lines.
 	log []string
+
+	// stopRenew ends the loop that brings the helper fresh bearers.
+	stopRenew context.CancelFunc
+	// renewAfter is how long after a renewal the app brings the next
+	// bearer, from what the lease has left (renewDelay).
+	renewAfter func(remaining time.Duration) time.Duration
+}
+
+// renewDelay brings a fresh bearer at 40% of what the lease has left: before
+// the helper would renew on its own (at half), with the bearer it holds,
+// which may have expired since. Never sooner than 20 s nor later than 50 min.
+func renewDelay(remaining time.Duration) time.Duration {
+	return min(max(remaining*2/5, 20*time.Second), 50*time.Minute)
 }
 
 // logf appends a timestamped line to the connection log shown in the UI.
@@ -65,7 +78,7 @@ func (c *Core) logf(format string, args ...any) {
 
 // New builds a Core from config.
 func New(cfg *Config) *Core {
-	return &Core{cfg: cfg, helper: helperclient.New(cfg.SocketPath)}
+	return &Core{cfg: cfg, helper: helperclient.New(cfg.SocketPath), renewAfter: renewDelay}
 }
 
 // deps is a consistent snapshot of the config and helper client.
@@ -156,6 +169,13 @@ func (c *Core) Status() Status {
 	c.mu.Lock()
 	if st.Connected && st.AssignedIP == "" {
 		st.AssignedIP = c.assigned
+	}
+	if st.Connected && st.LoggedIn && c.stopRenew == nil {
+		// A tunnel this Core did not bring up -- the app restarted under it
+		// -- still needs fresh bearers.
+		rctx, stop := context.WithCancel(context.Background())
+		c.stopRenew = stop
+		go c.keepRenewing(rctx)
 	}
 	st.Tenants = append([]hproto.Tenant(nil), c.tenants...)
 	st.TenantRequired = c.tenantRequired
@@ -341,18 +361,91 @@ func (c *Core) Connect(ctx context.Context) error {
 		c.logf("connect FAILED: %v", err)
 		return err
 	}
+	rctx, stop := context.WithCancel(context.Background())
 	c.mu.Lock()
 	c.connected, c.iface, c.assigned = true, hresp.Interface, hresp.AssignedIP
 	c.tenantRequired = false
+	if c.stopRenew != nil {
+		c.stopRenew()
+	}
+	c.stopRenew = stop
 	c.mu.Unlock()
 	c.logf("connected: interface=%s ip=%s tenant=%s", hresp.Interface, hresp.AssignedIP, hresp.Tenant)
+	go c.keepRenewing(rctx)
 	return nil
 }
 
-// Disconnect tears the tunnel down; the server-side lease expires on its own.
+// keepRenewing brings the helper a fresh bearer before each renewal of the
+// lease is due, for as long as the tunnel is up. The helper renews on its own
+// too, with the bearer it last had: enough for a long-lived one (GitHub),
+// not for a go-authn access token, which expires in minutes and which only
+// the app, holding the refresh token, can replace.
+func (c *Core) keepRenewing(ctx context.Context) {
+	defer func() {
+		// A loop that ended on its own (not stopped: a newer one may hold
+		// stopRenew) lets the next Status start another.
+		c.mu.Lock()
+		if ctx.Err() == nil {
+			c.stopRenew = nil
+		}
+		c.mu.Unlock()
+	}()
+	for {
+		_, helper := c.deps()
+		st, err := helper.Status()
+		if err != nil {
+			c.logf("renewal: %v", err)
+			return
+		}
+		if !st.Connected {
+			if st.LastError != "" {
+				c.logf("disconnected: %s", st.LastError)
+			}
+			c.mu.Lock()
+			c.connected, c.iface, c.assigned = false, "", ""
+			c.mu.Unlock()
+			return
+		}
+		remaining := 2 * time.Hour
+		if st.LeaseExpiresAt != nil {
+			remaining = time.Until(*st.LeaseExpiresAt)
+		}
+		timer := time.NewTimer(c.renewAfter(remaining))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		cfg, helper := c.deps()
+		_, bearer, err := c.session(ctx, cfg)
+		if err != nil {
+			// The helper keeps the bearer it has, and retries with it.
+			c.logf("renewal: no fresh sign-in: %v", err)
+			continue
+		}
+		if r, err := helper.Renew(bearer); err != nil {
+			c.logf("renewal FAILED: %v", err)
+		} else if r.LeaseExpiresAt != nil {
+			c.logf("lease renewed until %s", r.LeaseExpiresAt.Local().Format("15:04:05"))
+		}
+		if ctx.Err() != nil {
+			return
+		}
+	}
+}
+
+// Disconnect tears the tunnel down; the helper gives the address back to the
+// server (deregisters) rather than leave it held until the lease ends.
 func (c *Core) Disconnect(_ context.Context) error {
 	c.logf("disconnecting…")
 	_, helper := c.deps()
+	c.mu.Lock()
+	if c.stopRenew != nil {
+		c.stopRenew()
+		c.stopRenew = nil
+	}
+	c.mu.Unlock()
 	_, derr := helper.Down()
 	c.mu.Lock()
 	c.connected, c.iface, c.assigned = false, "", ""
