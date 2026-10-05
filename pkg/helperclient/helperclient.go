@@ -33,6 +33,12 @@ func (c *Client) Tenants(serverURL, bearer string) (*hproto.Response, error) {
 	return c.call(30*time.Second, hproto.Request{Action: hproto.ActionTenants, Connect: &hproto.ConnectSpec{ServerURL: serverURL, Bearer: bearer}})
 }
 
+// Renew hands the helper a fresh bearer for the tunnel it holds, and has it
+// renew the lease with it now.
+func (c *Client) Renew(bearer string) (*hproto.Response, error) {
+	return c.call(45*time.Second, hproto.Request{Action: hproto.ActionRenew, Connect: &hproto.ConnectSpec{Bearer: bearer}})
+}
+
 // Down tears the tunnel down.
 func (c *Client) Down() (*hproto.Response, error) {
 	return c.call(15*time.Second, hproto.Request{Action: hproto.ActionDown})

@@ -26,8 +26,8 @@ library they share.
 | `pkg/routeclient` | Watches the server's RouteService (gRPC) and reports live route updates without re-enrolling |
 | `pkg/routespb` | Generated gRPC/protobuf stubs for the RouteService (shared with the server) |
 | `pkg/appcore` | The app's business logic, shared by the macOS, Linux and Windows apps: sign-in, the **tenant chosen for the session**, connect/disconnect through the helper, status for the UI |
-| `pkg/helper` | The privileged helper (root / SYSTEM), shared by the three apps: enrolls, owns the tunnel, watches route pushes. Each app's helper binary is a `main` that loads its configuration and listens |
-| `pkg/hproto`, `pkg/helperclient` | The helper's socket protocol and the app's client for it |
+| `pkg/helper` | The privileged helper (root / SYSTEM), shared by the three apps: enrolls, owns the tunnel, keeps the server's lease, watches route pushes. Each app's helper binary is a `main` that loads its configuration and listens |
+| `pkg/hproto`, `pkg/helperclient` | The helper's socket protocol (`connect`, `tenants`, `renew`, `down`, `status`) and the app's client for it |
 | `pkg/tokenstore` | 0600 on-disk session store (auth tokens, device key, chosen tenant), used by `pkg/appcore` in all three apps |
 
 ## Architecture (end to end)
@@ -194,6 +194,33 @@ A route watch (`pkg/routeclient`) carries the bearer token, so it runs over
 **TLS** except to a loopback address. Against a server whose gRPC is not TLS,
 the handshake fails before the token is sent, and the tunnel stays up
 without live route updates.
+
+### The lease
+
+The server removes a peer whose lease ends (`LEASE_TTL`, 24 h by default).
+While the tunnel is up the helper renews it (`POST /api/v1/heartbeat`) at half
+of what the lease has left, between 30 s and an hour, and acts on the answer:
+
+| The server answers | The helper |
+|---|---|
+| a renewed lease | renews again at half of it |
+| `404 not_enrolled`: it forgot the device (restarted, or the lease ran out) | enrolls again, with the same key and tenant, and brings the tunnel up from that answer; if that fails too, takes the tunnel down |
+| `403` (`not_a_member`, `key_not_registered`): access withdrawn | takes the tunnel down |
+| `401`, a `5xx`, nothing | retries within a minute, sooner than the lease ends |
+
+It renews with the last bearer it was given. That is enough for a GitHub
+token, but not for a go-authn access token, which expires in minutes and
+which only the app can refresh. So while it runs, `pkg/appcore` brings the
+helper a fresh bearer (the `renew` action) at 40% of what the lease has left,
+before the helper's own renewal is due. An app restarted under a running
+tunnel starts doing so at its first `Status`. `renew` names no server, key or
+tenant: it renews the enrollment the helper made itself.
+
+Disconnecting (`down`) **deregisters** the peer, giving its address back,
+rather than leave it held until the lease ends. A helper that is stopping
+does not, so one restarted by its service manager finds the lease still
+there. The helper's `status` reports the lease (`lease_expires_at`) and why it
+last failed to keep the tunnel (`last_error`).
 
 ## Tenants
 

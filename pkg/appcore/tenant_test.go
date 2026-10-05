@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/claimward/claimward-vpn-client/pkg/helper"
 	"github.com/claimward/claimward-vpn-client/pkg/protocol"
@@ -21,6 +22,9 @@ import (
 	"github.com/claimward/claimward-vpn-client/pkg/wgkey"
 	"github.com/claimward/claimward-vpn-client/pkg/wgtun"
 )
+
+// worldMu guards what a world's server was asked.
+var worldMu sync.Mutex
 
 type nopTunnel struct{}
 
@@ -38,7 +42,7 @@ func world(t *testing.T) (*Core, *[]string) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("AppData", filepath.Join(home, "AppData"))
 
-	var mu sync.Mutex
+	mu := &worldMu
 	var asked []string
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+protocol.PathTenants, func(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +61,18 @@ func world(t *testing.T) (*Core, *[]string) {
 		}
 		pair, _ := wgkey.Generate()
 		json.NewEncoder(w).Encode(protocol.EnrollResponse{AssignedIP: "10.80.0.7/32", ServerPublicKey: pair.Public.String(), Endpoint: "vpn.example.org:51820", AllowedIPs: []string{"10.2.0.0/16"}})
+	})
+	mux.HandleFunc("POST "+protocol.PathHeartbeat, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked = append(asked, "heartbeat "+r.Header.Get("Authorization"))
+		mu.Unlock()
+		json.NewEncoder(w).Encode(protocol.HeartbeatResponse{LeaseExpiresAt: time.Now().Add(time.Hour)})
+	})
+	mux.HandleFunc("POST "+protocol.PathDeregister, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked = append(asked, "deregister")
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
 	})
 	vpn := httptest.NewServer(mux)
 	t.Cleanup(vpn.Close)
