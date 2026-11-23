@@ -22,8 +22,11 @@ type secretService struct{}
 
 var ssAttrs = []string{"service", "claimward", "account", "session-key"}
 
+// secretToolCmd is the program and its leading arguments; tests replace it.
+var secretToolCmd = []string{"secret-tool"}
+
 func (secretService) run(stdin string, args ...string) (string, error) {
-	cmd := exec.Command("secret-tool", args...)
+	cmd := exec.Command(secretToolCmd[0], append(append([]string{}, secretToolCmd[1:]...), args...)...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb

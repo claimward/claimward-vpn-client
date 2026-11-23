@@ -94,12 +94,8 @@ func Load() (*Session, error) {
 
 // migrate moves a legacy plaintext file into the store.
 func migrate() (*Session, error) {
-	p, err := Path()
-	if err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(p)
-	if errors.Is(err, fs.ErrNotExist) {
+	data, err := fileBackend{}.get()
+	if errors.Is(err, errNotFound) {
 		return nil, nil
 	}
 	if err != nil {
@@ -109,16 +105,30 @@ func migrate() (*Session, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, err
 	}
-	if plaintextAllowed() {
-		return &s, nil // the file is the store: nothing to move
-	}
 	if err := store.set(data); err != nil {
 		return &s, nil // keep the file rather than lose the session
 	}
-	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := removeLegacy(); err != nil {
 		return nil, err
 	}
 	return &s, nil
+}
+
+// removeLegacy deletes the plaintext file; a missing file is not an error.
+func removeLegacy() error {
+	p, err := Path()
+	if err != nil {
+		return err
+	}
+	return removeIfPresent(p)
+}
+
+// removeIfPresent deletes a file; a missing file is not an error.
+func removeIfPresent(p string) error {
+	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // Save stores the session, replacing any earlier one, and removes a legacy
@@ -132,16 +142,9 @@ func Save(s *Session) error {
 		return err
 	}
 	if plaintextAllowed() {
-		return nil
+		return nil // the file just written is the store
 	}
-	p, err := Path()
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	return nil
+	return removeLegacy()
 }
 
 // Clear deletes the session (logout). A missing session is not an error.
@@ -149,14 +152,7 @@ func Clear() error {
 	if err := current().del(); err != nil { // the legacy file is removed below either way
 		return err
 	}
-	p, err := Path()
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	return nil
+	return removeLegacy()
 }
 
 // fileBackend is the legacy 0600 JSON file: the fallback where the platform

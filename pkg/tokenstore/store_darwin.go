@@ -21,8 +21,11 @@ func platformBackend() backend { return sealedBackend{kr: keychain{}} }
 // `security -i` on standard input, never on the command line.
 type keychain struct{}
 
+// securityCmd is the program and its leading arguments; tests replace it.
+var securityCmd = []string{"/usr/bin/security"}
+
 func (keychain) run(stdin string, args ...string) (string, error) {
-	cmd := exec.Command("/usr/bin/security", args...)
+	cmd := exec.Command(securityCmd[0], append(append([]string{}, securityCmd[1:]...), args...)...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb

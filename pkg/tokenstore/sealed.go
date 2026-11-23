@@ -38,9 +38,7 @@ func (b sealedBackend) key(create bool) ([]byte, error) {
 	h, err := b.kr.get()
 	if errors.Is(err, errNotFound) && create {
 		k := make([]byte, 32)
-		if _, err := rand.Read(k); err != nil {
-			return nil, err
-		}
+		rand.Read(k) // never fails: it ends the program if the system has no entropy
 		if err := b.kr.set(hex.EncodeToString(k)); err != nil {
 			return nil, err
 		}
@@ -56,12 +54,12 @@ func (b sealedBackend) key(create bool) ([]byte, error) {
 	return k, nil
 }
 
-func gcm(key []byte) (cipher.AEAD, error) {
-	blk, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	return cipher.NewGCM(blk)
+// gcm builds the AEAD for a 32-byte key; key() only returns such keys, for
+// which neither call can fail.
+func gcm(key []byte) cipher.AEAD {
+	blk, _ := aes.NewCipher(key)
+	g, _ := cipher.NewGCM(blk)
+	return g
 }
 
 func (b sealedBackend) get() ([]byte, error) {
@@ -83,10 +81,7 @@ func (b sealedBackend) get() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	g, err := gcm(k)
-	if err != nil {
-		return nil, err
-	}
+	g := gcm(k)
 	if len(blob) < g.NonceSize() {
 		return nil, errors.New("tokenstore: the sealed session is truncated")
 	}
@@ -98,14 +93,9 @@ func (b sealedBackend) set(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrNoSecretStore, err)
 	}
-	g, err := gcm(k)
-	if err != nil {
-		return err
-	}
+	g := gcm(k)
 	nonce := make([]byte, g.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return err
-	}
+	rand.Read(nonce) // never fails, see key
 	p, err := sealedPath()
 	if err != nil {
 		return err
@@ -118,7 +108,7 @@ func (b sealedBackend) del() error {
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := removeIfPresent(p); err != nil {
 		return err
 	}
 	return b.kr.del()

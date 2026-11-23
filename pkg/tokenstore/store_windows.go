@@ -69,8 +69,5 @@ func (dpapi) del() error {
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	return nil
+	return removeIfPresent(p)
 }
