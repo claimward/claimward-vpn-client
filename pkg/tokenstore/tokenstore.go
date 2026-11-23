@@ -134,10 +134,7 @@ func removeIfPresent(p string) error {
 // Save stores the session, replacing any earlier one, and removes a legacy
 // plaintext file.
 func Save(s *Session) error {
-	data, err := json.Marshal(s)
-	if err != nil {
-		return err
-	}
+	data, _ := json.Marshal(s) // a Session holds only strings and a time: it cannot fail
 	if err := current().set(data); err != nil {
 		return err
 	}

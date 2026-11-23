@@ -17,7 +17,8 @@ func TestSealedBackendWithoutAConfigDir(t *testing.T) {
 	if _, err := b.get(); err == nil || errors.Is(err, errNotFound) {
 		t.Errorf("get = %v, want a config-dir error", err)
 	}
-	if err := b.set([]byte("x")); err == nil || errors.Is(err, ErrNoSecretStore) {
+	isPathErr(t, "set", b.set([]byte("x")))
+	if err := b.set([]byte("x")); errors.Is(err, ErrNoSecretStore) {
 		t.Errorf("set = %v, want a config-dir error", err)
 	}
 	if err := b.del(); err == nil {

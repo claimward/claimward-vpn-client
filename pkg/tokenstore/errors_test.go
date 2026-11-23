@@ -33,7 +33,24 @@ func noConfigDir(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("AppData", "")
 	if _, err := Path(); err == nil {
-		t.Skip("this platform finds a config dir without any variable")
+		t.Fatal("Path found a config dir with HOME, XDG_CONFIG_HOME and AppData empty")
+	}
+}
+
+// isPathErr fails the test unless err is the one Path reports: the failure of
+// the config dir itself, not a later one it also causes.
+func isPathErr(t *testing.T, what string, err error) {
+	t.Helper()
+	_, want := Path()
+	if err == nil || want == nil || !strings.Contains(err.Error(), want.Error()) {
+		t.Errorf("%s = %v, want the config-dir error %v", what, err, want)
+	}
+}
+
+func TestPathReportsAMissingConfigDir(t *testing.T) {
+	noConfigDir(t)
+	if p, err := Path(); err == nil || p != "" {
+		t.Errorf("Path = %q, %v", p, err)
 	}
 }
 
@@ -63,9 +80,7 @@ func TestNoConfigDirIsReportedEverywhere(t *testing.T) {
 	if _, err := Load(); err == nil {
 		t.Error("file Load: no error")
 	}
-	if err := Save(&Session{Bearer: "b"}); err == nil {
-		t.Error("file Save: no error")
-	}
+	isPathErr(t, "file Save", Save(&Session{Bearer: "b"}))
 	if err := Clear(); err == nil {
 		t.Error("file Clear: no error")
 	}
@@ -173,8 +188,8 @@ func TestMigrateReportsAnUnreadableLegacyFile(t *testing.T) {
 	_ = dir
 	store = sealedBackend{kr: &memKeyring{}}
 	// The sealed read fails first on this layout, so go through migrate directly.
-	if _, err := migrate(); err == nil {
-		t.Error("an unreadable legacy file: no error")
+	if _, err := migrate(); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("migrate = %v, want the read error", err)
 	}
 }
 
