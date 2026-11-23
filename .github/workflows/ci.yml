@@ -25,10 +25,36 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
       - run: CGO_ENABLED=0 go build ./...
       - run: go vet ./...
       - run: CGO_ENABLED=0 go test -count=1 ./...
+
+  # Known vulnerabilities in what the module imports and calls.
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.4'
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
+      - run: govulncheck ./...
+
+  # The decoders of untrusted input, each fuzzed for a short while from the
+  # corpus committed under testdata/fuzz (a failing input is a new file there).
+  fuzz:
+    name: fuzz (untrusted decoders)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.4'
+      - run: CGO_ENABLED=0 go test -fuzz '^FuzzHelperRequest$' -fuzztime 30s ./pkg/helper
+      - run: CGO_ENABLED=0 go test -fuzz '^FuzzServerResponse$' -fuzztime 30s ./pkg/client
+      - run: CGO_ENABLED=0 go test -fuzz '^FuzzUAPIConfig$' -fuzztime 30s ./pkg/wgtun
 
   crossbuild:
     name: cross-build (${{ matrix.goarch }})
@@ -41,7 +67,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
       - run: CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.goarch }} go build ./...
 
 
@@ -56,7 +82,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
       - run: CGO_ENABLED=0 GOOS=windows GOARCH=${{ matrix.goarch }} go build ./...
       - run: CGO_ENABLED=0 GOOS=windows GOARCH=${{ matrix.goarch }} go vet ./...
       - run: CGO_ENABLED=0 GOOS=windows GOARCH=${{ matrix.goarch }} go test -c -o /dev/null ./pkg/helper
@@ -75,7 +101,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
       - run: go vet ./...
       - run: go test -count=1 ./...
       - name: Helper ACL tests (a skip is a failure here)

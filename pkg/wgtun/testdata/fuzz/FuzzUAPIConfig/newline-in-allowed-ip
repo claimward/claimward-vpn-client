@@ -1,0 +1,4 @@
+go test fuzz v1
+string("192.0.2.1:51820")
+string("10.0.0.0/8\nallowed_ip=0.0.0.0/0")
+int(25)
