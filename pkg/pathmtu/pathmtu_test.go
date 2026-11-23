@@ -86,7 +86,12 @@ func TestSourceAddr(t *testing.T) {
 	}
 	old := dialUDP
 	defer func() { dialUDP = old }()
-	dialUDP = func(*net.UDPAddr) (*net.UDPConn, error) { return nil, errors.New("no route") }
+	// The stub hands back a usable connection WITH the error, so that code
+	// ignoring the error yields a source address and the test sees it.
+	dialUDP = func(*net.UDPAddr) (*net.UDPConn, error) {
+		c, _ := net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:9")))
+		return c, errors.New("no route")
+	}
 	if src, err := sourceAddr(netip.MustParseAddrPort("192.0.2.1:9")); err == nil {
 		t.Errorf("sourceAddr with no route = %v, want an error", src)
 	}
