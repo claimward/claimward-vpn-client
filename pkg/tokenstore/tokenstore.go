@@ -1,9 +1,15 @@
 // Package tokenstore persists the user's session (OIDC tokens and the device's
-// WireGuard private key) on disk with owner-only permissions.
+// WireGuard private key) in the platform's secret store, never in clear on
+// disk:
 //
-// This is a pragmatic MVP store: a 0600 JSON file under the user's config dir.
-// On macOS the platform app is expected to graduate this to the Keychain; the
-// API here is intentionally small so that swap is local.
+//   - macOS: the login Keychain, through /usr/bin/security;
+//   - Windows: DPAPI (CryptProtectData), the blob kept in the user's config dir;
+//   - Linux: the Secret Service (GNOME Keyring, KWallet), through secret-tool.
+//
+// A session written by an earlier version as a 0600 JSON file is moved into
+// the store on first load and the file deleted. On a machine with no secret
+// store (a headless Linux server) saving fails with ErrNoSecretStore, unless
+// CLAIMWARD_ALLOW_PLAINTEXT_SESSION=1 opts into the old 0600 file.
 package tokenstore
 
 import (
@@ -34,7 +40,33 @@ type Session struct {
 	Tenant string `json:"tenant,omitempty"`
 }
 
-// Path returns the on-disk location of the session file.
+// ErrNoSecretStore is returned by Save when the platform has no secret store
+// to hold the session and the plaintext opt-in is not set.
+var ErrNoSecretStore = errors.New("tokenstore: no secret store available (install a Secret Service such as gnome-keyring, or set CLAIMWARD_ALLOW_PLAINTEXT_SESSION=1 to keep a 0600 file)")
+
+// errNotFound is a backend's "nothing stored".
+var errNotFound = errors.New("tokenstore: not found")
+
+// backend is one place a session's bytes can live.
+type backend interface {
+	get() ([]byte, error) // errNotFound when empty
+	set([]byte) error
+	del() error // a missing entry is not an error
+}
+
+// store is the platform's backend; tests replace it.
+var store backend = platformBackend()
+
+// current is the backend in use: the 0600 file when the person opted into it,
+// the platform's secret store otherwise.
+func current() backend {
+	if plaintextAllowed() {
+		return fileBackend{}
+	}
+	return store
+}
+
+// Path returns the on-disk location of the legacy plaintext session file.
 func Path() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
@@ -44,14 +76,11 @@ func Path() (string, error) {
 }
 
 // Load reads the session. It returns (nil, nil) when no session exists yet.
+// A legacy plaintext file is migrated into the secret store and removed.
 func Load() (*Session, error) {
-	p, err := Path()
-	if err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(p)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+	data, err := current().get()
+	if errors.Is(err, errNotFound) {
+		return migrate()
 	}
 	if err != nil {
 		return nil, err
@@ -63,19 +92,95 @@ func Load() (*Session, error) {
 	return &s, nil
 }
 
-// Save writes the session atomically with 0600 permissions.
-func Save(s *Session) error {
+// migrate moves a legacy plaintext file into the store.
+func migrate() (*Session, error) {
+	data, err := fileBackend{}.get()
+	if errors.Is(err, errNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var s Session
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, err
+	}
+	if err := store.set(data); err != nil {
+		return &s, nil // keep the file rather than lose the session
+	}
+	if err := removeLegacy(); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+// removeLegacy deletes the plaintext file; a missing file is not an error.
+func removeLegacy() error {
 	p, err := Path()
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+	return removeIfPresent(p)
+}
+
+// removeIfPresent deletes a file; a missing file is not an error.
+func removeIfPresent(p string) error {
+	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	data, err := json.MarshalIndent(s, "", "  ")
+	return nil
+}
+
+// Save stores the session, replacing any earlier one, and removes a legacy
+// plaintext file.
+func Save(s *Session) error {
+	data, _ := json.Marshal(s) // a Session holds only strings and a time: it cannot fail
+	if err := current().set(data); err != nil {
+		return err
+	}
+	if plaintextAllowed() {
+		return nil // the file just written is the store
+	}
+	return removeLegacy()
+}
+
+// Clear deletes the session (logout). A missing session is not an error.
+func Clear() error {
+	if err := current().del(); err != nil { // the legacy file is removed below either way
+		return err
+	}
+	return removeLegacy()
+}
+
+// fileBackend is the legacy 0600 JSON file: the fallback where the platform
+// has no secret store and the person opted in.
+type fileBackend struct{}
+
+func (fileBackend) get() ([]byte, error) {
+	p, err := Path()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, errNotFound
+	}
+	return data, err
+}
+
+func (fileBackend) set(data []byte) error {
+	p, err := Path()
 	if err != nil {
 		return err
 	}
+	return writeAtomic(p, data)
+}
+
+func (fileBackend) del() error { return nil } // Clear removes the file
+
+// writeAtomic writes data to p with 0600 permissions, via a rename.
+func writeAtomic(p string, data []byte) error {
+	os.MkdirAll(filepath.Dir(p), 0o700) // a failure shows as WriteFile's own error
 	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
@@ -83,14 +188,5 @@ func Save(s *Session) error {
 	return os.Rename(tmp, p)
 }
 
-// Clear deletes the session file (logout). Missing file is not an error.
-func Clear() error {
-	p, err := Path()
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	return nil
-}
+// plaintextAllowed reports the opt-in for the 0600 file.
+func plaintextAllowed() bool { return os.Getenv("CLAIMWARD_ALLOW_PLAINTEXT_SESSION") == "1" }

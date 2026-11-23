@@ -28,7 +28,7 @@ library they share.
 | `pkg/appcore` | The app's business logic, shared by the macOS, Linux and Windows apps: sign-in, the **tenant chosen for the session**, connect/disconnect through the helper, status for the UI |
 | `pkg/helper` | The privileged helper (root / SYSTEM), shared by the three apps: enrolls, owns the tunnel, keeps the server's lease, watches route pushes. Each app's helper binary is a `main` that loads its configuration and listens |
 | `pkg/hproto`, `pkg/helperclient` | The helper's socket protocol (`connect`, `tenants`, `renew`, `down`, `status`) and the app's client for it |
-| `pkg/tokenstore` | 0600 on-disk session store (auth tokens, device key, chosen tenant), used by `pkg/appcore` in all three apps |
+| `pkg/tokenstore` | session store in the platform secret store (Keychain, DPAPI, Secret Service; auth tokens, device key, chosen tenant), used by `pkg/appcore` in all three apps |
 
 ## Architecture (end to end)
 
@@ -254,8 +254,16 @@ The helper's own `helper.json` takes `servers` (required), `group` (default
 
 ## Notes
 
-- The session store (`pkg/tokenstore`) is a 0600 JSON file under the user's
-  config dir (`os.UserConfigDir()`), on every platform.
+- The session store (`pkg/tokenstore`) never holds the tokens or the device
+  key in clear. macOS: the session is sealed with AES-256-GCM and the key sits
+  in the login Keychain (item `claimward` / `session-key`). Windows: the
+  session is a DPAPI blob (`session.dpapi`) only that user can open. Linux:
+  as macOS, with the key in the Secret Service (`secret-tool`, from
+  libsecret). Files live under the config dir (`os.UserConfigDir()`/claimward).
+  A `session.json` written by an earlier version is moved into the store on
+  first load and deleted. On a machine with no secret store (a headless Linux
+  server) saving fails with `ErrNoSecretStore`; setting
+  `CLAIMWARD_ALLOW_PLAINTEXT_SESSION=1` opts into the old 0600 JSON file.
 - Creating the tun device and changing routes (`pkg/wgtun`) require elevated
   privileges; each app delegates this to its privileged helper (`pkg/helper`).
 - `pkg/wgtun` implements macOS, Linux and Windows. On Windows the device is a
