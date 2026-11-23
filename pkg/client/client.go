@@ -104,6 +104,9 @@ func TunnelConfig(resp *protocol.EnrollResponse, priv wgtypes.Key) (wgtun.Config
 	}, nil
 }
 
+// maxResponseBytes bounds what one answer from the server is read to.
+const maxResponseBytes = 1 << 20
+
 func (c *Client) do(ctx context.Context, method, path, bearer string, body, out any) error {
 	var rdr io.Reader
 	if body != nil {
@@ -129,7 +132,14 @@ func (c *Client) do(ctx context.Context, method, path, bearer string, body, out 
 	}
 	defer resp.Body.Close()
 
-	data, _ := io.ReadAll(resp.Body)
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if len(data) > maxResponseBytes {
+		if resp.StatusCode/100 != 2 {
+			data = data[:maxResponseBytes]
+		} else {
+			return fmt.Errorf("response larger than %d bytes", maxResponseBytes)
+		}
+	}
 	if resp.StatusCode/100 != 2 {
 		se := &ServerError{Status: resp.StatusCode}
 		var e protocol.ErrorResponse

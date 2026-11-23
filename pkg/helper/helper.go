@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -173,6 +174,7 @@ func (s *Server) UseRouteWatch(w func(ctx context.Context, endpoint, bearer, pub
 
 // Serve answers connections until ln is closed.
 func (s *Server) Serve(ln net.Listener) error {
+	sem := make(chan struct{}, maxConns)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -181,15 +183,32 @@ func (s *Server) Serve(ln net.Listener) error {
 			}
 			return err
 		}
-		go s.handle(conn)
+		select {
+		case sem <- struct{}{}:
+			go func() {
+				defer func() { <-sem }()
+				s.handle(conn)
+			}()
+		default:
+			// Too many open at once: refuse rather than queue (audit 2026-11-23).
+			conn.Close()
+		}
 	}
 }
+
+const (
+	// maxRequestBytes bounds what one request on the socket may carry: a
+	// request is a bearer, a key and a few names.
+	maxRequestBytes = 64 << 10
+	// maxConns bounds the connections served at once.
+	maxConns = 32
+)
 
 func (s *Server) handle(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
 	var req hproto.Request
-	if err := json.NewDecoder(conn).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(conn, maxRequestBytes)).Decode(&req); err != nil {
 		reply(conn, hproto.Response{Error: "bad request: " + err.Error()})
 		return
 	}

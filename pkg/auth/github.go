@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -124,5 +125,5 @@ func (p *githubProvider) form(ctx context.Context, path string, values url.Value
 		return err
 	}
 	defer resp.Body.Close()
-	return json.NewDecoder(resp.Body).Decode(out)
+	return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out)
 }
