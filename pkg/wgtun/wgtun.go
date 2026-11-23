@@ -12,6 +12,7 @@ package wgtun
 import (
 	"encoding/hex"
 	"fmt"
+	"net/netip"
 	"strings"
 
 	"golang.zx2c4.com/wireguard/conn"
@@ -43,27 +44,95 @@ type Tunnel struct {
 
 // uapiConfig renders the WireGuard UAPI "set" payload. UAPI uses lowercase hex
 // keys (not the base64 wg encoding).
+//
+// Nothing the server sent is written verbatim: the endpoint and the allowed
+// IPs are parsed and rendered from the parsed value, so a newline in one of
+// them cannot become a UAPI line of the server's choosing. A configuration
+// that does not parse renders as a payload the device refuses.
 func uapiConfig(cfg Config) string {
+	s, err := renderUAPI(cfg)
+	if err != nil {
+		return "invalid=" + "configuration\n"
+	}
+	return s
+}
+
+// MTU bounds: IPv4's minimum reassembly size and a jumbo frame.
+const (
+	minMTU = 576
+	maxMTU = 9000
+)
+
+// clampMTU is the MTU to use for a server-supplied one: 0 is the default,
+// anything else is held within [minMTU, maxMTU].
+func clampMTU(mtu int) int {
+	if mtu == 0 {
+		return device.DefaultMTU
+	}
+	return min(max(mtu, minMTU), maxMTU)
+}
+
+// canonPrefixes parses every entry as a CIDR and returns its canonical form.
+func canonPrefixes(in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	for _, a := range in {
+		p, err := netip.ParsePrefix(a)
+		if err != nil {
+			return nil, fmt.Errorf("allowed ip %q: %w", a, err)
+		}
+		out = append(out, p.String())
+	}
+	return out, nil
+}
+
+func renderUAPI(cfg Config) (string, error) {
+	ep, err := netip.ParseAddrPort(cfg.Endpoint)
+	if err != nil {
+		return "", fmt.Errorf("endpoint %q: %w", cfg.Endpoint, err)
+	}
+	ips, err := canonPrefixes(cfg.AllowedIPs)
+	if err != nil {
+		return "", err
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "private_key=%s\n", hex.EncodeToString(cfg.PrivateKey[:]))
 	b.WriteString("replace_peers=true\n")
 	fmt.Fprintf(&b, "public_key=%s\n", hex.EncodeToString(cfg.ServerPublicKey[:]))
-	fmt.Fprintf(&b, "endpoint=%s\n", cfg.Endpoint)
+	fmt.Fprintf(&b, "endpoint=%s\n", ep)
 	if cfg.Keepalive > 0 {
-		fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", cfg.Keepalive)
+		fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", min(cfg.Keepalive, 65535))
 	}
-	for _, a := range cfg.AllowedIPs {
+	for _, a := range ips {
 		fmt.Fprintf(&b, "allowed_ip=%s\n", a)
 	}
-	return b.String()
+	return b.String(), nil
+}
+
+// renderRoutes is the UAPI payload replacing the peer's allowed IPs, and the
+// canonical list it carries.
+func renderRoutes(pub wgtypes.Key, allowedIPs []string) (string, []string, error) {
+	ips, err := canonPrefixes(allowedIPs)
+	if err != nil {
+		return "", nil, err
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "public_key=%s\n", hex.EncodeToString(pub[:]))
+	b.WriteString("replace_allowed_ips=true\n")
+	for _, a := range ips {
+		fmt.Fprintf(&b, "allowed_ip=%s\n", a)
+	}
+	return b.String(), ips, nil
 }
 
 // Up creates the interface, configures WireGuard, and applies addressing/routes.
 func Up(cfg Config) (*Tunnel, error) {
-	mtu := cfg.MTU
-	if mtu == 0 {
-		mtu = device.DefaultMTU
+	if _, err := renderUAPI(cfg); err != nil {
+		return nil, fmt.Errorf("invalid tunnel configuration: %w", err)
 	}
+	ips, _ := canonPrefixes(cfg.AllowedIPs)
+	cfg.AllowedIPs = ips
+	cfg.MTU = clampMTU(cfg.MTU)
+	mtu := cfg.MTU
 	tunDev, err := tun.CreateTUN(tunName, mtu)
 	if err != nil {
 		return nil, fmt.Errorf("create tun device (need root?): %w", err)
@@ -101,13 +170,11 @@ func (t *Tunnel) Name() string { return t.name }
 // WireGuard peer's AllowedIPs and adds/removes the corresponding OS routes
 // (diffed against the current set). Used to apply route pushes from the server.
 func (t *Tunnel) UpdateRoutes(allowedIPs []string) error {
-	var b strings.Builder
-	fmt.Fprintf(&b, "public_key=%s\n", hex.EncodeToString(t.cfg.ServerPublicKey[:]))
-	b.WriteString("replace_allowed_ips=true\n")
-	for _, a := range allowedIPs {
-		fmt.Fprintf(&b, "allowed_ip=%s\n", a)
+	payload, allowedIPs, err := renderRoutes(t.cfg.ServerPublicKey, allowedIPs)
+	if err != nil {
+		return fmt.Errorf("update allowed ips: %w", err)
 	}
-	if err := t.dev.IpcSet(b.String()); err != nil {
+	if err := t.dev.IpcSet(payload); err != nil {
 		return fmt.Errorf("update allowed ips: %w", err)
 	}
 
