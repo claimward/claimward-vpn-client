@@ -1,6 +1,8 @@
 package wgtun
 
 import (
+	"errors"
+	"net"
 	"net/netip"
 	"testing"
 )
@@ -74,8 +76,21 @@ func TestSystemLinksFindsLoopback(t *testing.T) {
 	}
 }
 
-func TestLocalLinkMTUUnreachable(t *testing.T) {
-	if got := localLinkMTU(netip.AddrPort{}); got != 0 {
-		t.Errorf("localLinkMTU(zero) = %d, want 0", got)
+func TestSourceAddr(t *testing.T) {
+	src, err := sourceAddr(netip.MustParseAddrPort("127.0.0.1:9"))
+	if err != nil || src != netip.MustParseAddr("127.0.0.1") {
+		t.Errorf("sourceAddr(loopback) = %v, %v; want 127.0.0.1", src, err)
+	}
+	old := dialUDP
+	defer func() { dialUDP = old }()
+	dialUDP = func(*net.UDPAddr) (*net.UDPConn, error) { return nil, errors.New("no route") }
+	if src, err := sourceAddr(netip.MustParseAddrPort("192.0.2.1:9")); err == nil {
+		t.Errorf("sourceAddr with no route = %v, want an error", src)
+	}
+	if got := localLinkMTU(netip.MustParseAddrPort("192.0.2.1:9")); got != 0 {
+		t.Errorf("localLinkMTU with no route = %d, want 0", got)
+	}
+	if got := localLinkMTU(netip.MustParseAddrPort("[::ffff:127.0.0.1]:9")); got < 0 {
+		t.Errorf("negative MTU %d", got)
 	}
 }

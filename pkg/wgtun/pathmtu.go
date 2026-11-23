@@ -42,13 +42,27 @@ var pathMTUFunc = localLinkMTU
 // holds it. This reads the same routing decision on macOS, Linux and
 // Windows without a platform API.
 func localLinkMTU(addr netip.AddrPort) int {
-	c, err := net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(addr))
+	src, err := sourceAddr(addr)
 	if err != nil {
 		return 0
 	}
+	return mtuOfSource(src, systemLinks())
+}
+
+// dialUDP is a variable so tests can make the route lookup fail.
+var dialUDP = func(raddr *net.UDPAddr) (*net.UDPConn, error) {
+	return net.DialUDP("udp", nil, raddr)
+}
+
+// sourceAddr is the local address the kernel picks to reach addr.
+func sourceAddr(addr netip.AddrPort) (netip.Addr, error) {
+	c, err := dialUDP(net.UDPAddrFromAddrPort(addr))
+	if err != nil {
+		return netip.Addr{}, err
+	}
 	defer c.Close()
 	la, _ := c.LocalAddr().(*net.UDPAddr) // always a *net.UDPAddr for DialUDP
-	return mtuOfSource(la.AddrPort().Addr().Unmap(), systemLinks())
+	return la.AddrPort().Addr().Unmap(), nil
 }
 
 // link is one interface: its MTU and the prefixes configured on it.
