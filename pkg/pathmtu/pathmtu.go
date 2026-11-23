@@ -1,4 +1,13 @@
-package wgtun
+// Package pathmtu fits a tunnel MTU to the path the tunnel's packets take.
+//
+// A WireGuard packet carries 60 bytes (IPv4 underlay) or 80 (IPv6) of
+// overhead, so a tunnel MTU of 1420 needs a 1480-byte path. Over a smaller
+// path the oversized segments are dropped, and TCP stalls on 200 ms
+// retransmission timeouts.
+//
+// The package has no dependency beyond the standard library, so the server
+// can use it too.
+package pathmtu
 
 import (
 	"net"
@@ -8,40 +17,50 @@ import (
 // Underlay overhead of a WireGuard packet: outer IP header + UDP (8) +
 // WireGuard data header and tag (32), i.e. 60 over IPv4 and 80 over IPv6.
 const (
-	overheadV4 = 60
-	overheadV6 = 80
+	OverheadV4 = 60
+	OverheadV6 = 80
 
-	// floorMTU is IPv6's minimum link MTU: the path clamp never goes below
-	// it (a server value below it is still honoured, never raised).
-	floorMTU = 1280
+	// Floor is IPv6's minimum link MTU: the path clamp never goes below it
+	// (a server value below it is still honoured, never raised).
+	Floor = 1280
 )
 
-// effectiveMTU is the tunnel MTU to use: the server's value, lowered to what
+// Effective is the tunnel MTU to use: the server's value, lowered to what
 // the path to the endpoint carries (pathMTU, the MTU of the local link the
 // endpoint is reached through, 0 = unknown, minus the underlay overhead of
 // the endpoint's address family). It is never above the server's value and
-// the path clamp never goes below floorMTU.
-func effectiveMTU(server, pathMTU int, endpoint netip.Addr) int {
+// the path clamp never goes below Floor.
+func Effective(server, pathMTU int, endpoint netip.Addr) int {
 	if pathMTU <= 0 {
 		return server
 	}
-	over := overheadV4
+	over := OverheadV4
 	if endpoint.Is6() && !endpoint.Is4In6() {
-		over = overheadV6
+		over = OverheadV6
 	}
-	fit := max(pathMTU-over, floorMTU)
+	fit := max(pathMTU-over, Floor)
 	return min(server, fit)
 }
 
-// pathMTUFunc reports the MTU of the local link used to reach addr, 0 when
+// linkMTUFunc reports the MTU of the local link used to reach addr, 0 when
 // it cannot be told. It is a variable so tests can stand in for the network.
-var pathMTUFunc = localLinkMTU
+var linkMTUFunc = LinkMTU
 
-// localLinkMTU asks the kernel which source address a UDP socket to addr
-// would use (no packet is sent) and returns the MTU of the interface that
-// holds it. This reads the same routing decision on macOS, Linux and
-// Windows without a platform API.
-func localLinkMTU(addr netip.AddrPort) int {
+// Fit lowers serverMTU to fit the path to endpoint (host:port); an endpoint
+// that does not parse leaves it unchanged.
+func Fit(serverMTU int, endpoint string) int {
+	ep, err := netip.ParseAddrPort(endpoint)
+	if err != nil {
+		return serverMTU
+	}
+	return Effective(serverMTU, linkMTUFunc(ep), ep.Addr().Unmap())
+}
+
+// LinkMTU asks the kernel which source address a UDP socket to addr would
+// use (no packet is sent) and returns the MTU of the interface that holds
+// it, 0 when unknown. This reads the same routing decision on macOS, Linux
+// and Windows without a platform API.
+func LinkMTU(addr netip.AddrPort) int {
 	src, _ := sourceAddr(addr) // no route: the zero address, which no link holds
 	return mtuOfSource(src, systemLinks())
 }
@@ -99,15 +118,4 @@ func mtuOfSource(src netip.Addr, links []link) int {
 		}
 	}
 	return 0
-}
-
-// tunnelMTU resolves the MTU for cfg: the server's (default when absent),
-// lowered to fit the path to cfg.Endpoint.
-func tunnelMTU(serverMTU int, endpoint string) int {
-	m := clampMTU(serverMTU)
-	ep, err := netip.ParseAddrPort(endpoint)
-	if err != nil {
-		return m
-	}
-	return effectiveMTU(m, pathMTUFunc(ep), ep.Addr().Unmap())
 }

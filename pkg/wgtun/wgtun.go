@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"strings"
 
+	"github.com/claimward/claimward-vpn-client/pkg/pathmtu"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
@@ -131,7 +132,7 @@ func Up(cfg Config) (*Tunnel, error) {
 	}
 	ips, _ := canonPrefixes(cfg.AllowedIPs)
 	cfg.AllowedIPs = ips
-	cfg.MTU = tunnelMTU(cfg.MTU, cfg.Endpoint)
+	cfg.MTU = pathmtu.Fit(clampMTU(cfg.MTU), cfg.Endpoint)
 	mtu := cfg.MTU
 	tunDev, err := tun.CreateTUN(tunName, mtu)
 	if err != nil {

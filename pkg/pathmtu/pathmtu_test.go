@@ -1,4 +1,4 @@
-package wgtun
+package pathmtu
 
 import (
 	"errors"
@@ -26,23 +26,23 @@ func TestEffectiveMTU(t *testing.T) {
 		{"server below floor honoured", 1200, 1450, v4, 1200},
 		{"4in6 is v4", 1420, 1450, netip.MustParseAddr("::ffff:192.0.2.1"), 1390},
 	} {
-		if got := effectiveMTU(c.server, c.path, c.ep); got != c.want {
-			t.Errorf("%s: effectiveMTU(%d,%d,%v) = %d, want %d", c.name, c.server, c.path, c.ep, got, c.want)
+		if got := Effective(c.server, c.path, c.ep); got != c.want {
+			t.Errorf("%s: Effective(%d,%d,%v) = %d, want %d", c.name, c.server, c.path, c.ep, got, c.want)
 		}
 	}
 }
 
-func TestTunnelMTU(t *testing.T) {
-	old := pathMTUFunc
-	defer func() { pathMTUFunc = old }()
-	pathMTUFunc = func(netip.AddrPort) int { return 1450 }
-	if got := tunnelMTU(0, "192.0.2.1:51820"); got != 1390 {
-		t.Errorf("default server MTU over 1450 path = %d, want 1390", got)
+func TestFit(t *testing.T) {
+	old := linkMTUFunc
+	defer func() { linkMTUFunc = old }()
+	linkMTUFunc = func(netip.AddrPort) int { return 1450 }
+	if got := Fit(1420, "192.0.2.1:51820"); got != 1390 {
+		t.Errorf("1420 over 1450 path = %d, want 1390", got)
 	}
-	if got := tunnelMTU(1300, "192.0.2.1:51820"); got != 1300 {
+	if got := Fit(1300, "192.0.2.1:51820"); got != 1300 {
 		t.Errorf("server 1300 = %d, want 1300", got)
 	}
-	if got := tunnelMTU(1420, "not an endpoint"); got != 1420 {
+	if got := Fit(1420, "not an endpoint"); got != 1420 {
 		t.Errorf("unparsable endpoint = %d, want 1420", got)
 	}
 }
@@ -74,8 +74,8 @@ func TestSystemLinksFindsLoopback(t *testing.T) {
 	if got := mtuOfSource(netip.MustParseAddr("127.0.0.1"), systemLinks()); got <= 0 {
 		t.Skipf("no interface holds 127.0.0.1 here")
 	}
-	if got := localLinkMTU(netip.MustParseAddrPort("127.0.0.1:9")); got <= 0 {
-		t.Errorf("localLinkMTU(loopback) = %d, want the loopback interface MTU", got)
+	if got := LinkMTU(netip.MustParseAddrPort("127.0.0.1:9")); got <= 0 {
+		t.Errorf("LinkMTU(loopback) = %d, want the loopback interface MTU", got)
 	}
 }
 
@@ -90,10 +90,10 @@ func TestSourceAddr(t *testing.T) {
 	if src, err := sourceAddr(netip.MustParseAddrPort("192.0.2.1:9")); err == nil {
 		t.Errorf("sourceAddr with no route = %v, want an error", src)
 	}
-	if got := localLinkMTU(netip.MustParseAddrPort("192.0.2.1:9")); got != 0 {
-		t.Errorf("localLinkMTU with no route = %d, want 0", got)
+	if got := LinkMTU(netip.MustParseAddrPort("192.0.2.1:9")); got != 0 {
+		t.Errorf("LinkMTU with no route = %d, want 0", got)
 	}
-	if got := localLinkMTU(netip.MustParseAddrPort("[::ffff:127.0.0.1]:9")); got < 0 {
+	if got := LinkMTU(netip.MustParseAddrPort("[::ffff:127.0.0.1]:9")); got < 0 {
 		t.Errorf("negative MTU %d", got)
 	}
 }
