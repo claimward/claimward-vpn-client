@@ -42,10 +42,7 @@ var pathMTUFunc = localLinkMTU
 // holds it. This reads the same routing decision on macOS, Linux and
 // Windows without a platform API.
 func localLinkMTU(addr netip.AddrPort) int {
-	src, err := sourceAddr(addr)
-	if err != nil {
-		return 0
-	}
+	src, _ := sourceAddr(addr) // no route: the zero address, which no link holds
 	return mtuOfSource(src, systemLinks())
 }
 
@@ -91,6 +88,9 @@ func systemLinks() []link {
 
 // mtuOfSource is the MTU of the link holding src, 0 when none does.
 func mtuOfSource(src netip.Addr, links []link) int {
+	if !src.IsValid() {
+		return 0
+	}
 	for _, l := range links {
 		for _, p := range l.addrs {
 			if p.Addr().Unmap() == src {

@@ -60,8 +60,11 @@ func TestMTUOfSource(t *testing.T) {
 		{"fe80::1", 1450},
 		{"198.51.100.7", 1450},
 		{"203.0.113.1", 0},
+		{"", 0}, // no source address: must not match an unparsed (zero) prefix
 	} {
-		if got := mtuOfSource(netip.MustParseAddr(c.src), links); got != c.want {
+		src, _ := netip.ParseAddr(c.src)
+		links := append(links, link{mtu: 9000, addrs: []netip.Prefix{{}}})
+		if got := mtuOfSource(src, links); got != c.want {
 			t.Errorf("mtuOfSource(%s) = %d, want %d", c.src, got, c.want)
 		}
 	}
