@@ -241,7 +241,7 @@ on Windows), then these environment overrides:
 
 | Key | Environment | Notes |
 |---|---|---|
-| `server_url` | `CLAIMWARD_SERVER` | required; must also be listed in the helper's `servers` |
+| `server_url` | `CLAIMWARD_SERVER` | required; `https://` only (`http://` is accepted for a loopback address, for development); must also be listed in the helper's `servers`, which follow the same rule |
 | `provider` | `CLAIMWARD_AUTH_PROVIDER` | `github` (default), `oidc` or `go-authn` |
 | `github_client_id` | `CLAIMWARD_GITHUB_CLIENT_ID` | required for `github` |
 | `oidc_issuer` | `CLAIMWARD_OIDC_ISSUER` | required for `oidc` and `go-authn` |

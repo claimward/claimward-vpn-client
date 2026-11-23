@@ -33,6 +33,7 @@ import (
 	"github.com/claimward/claimward-vpn-client/pkg/hproto"
 	"github.com/claimward/claimward-vpn-client/pkg/protocol"
 	"github.com/claimward/claimward-vpn-client/pkg/routeclient"
+	"github.com/claimward/claimward-vpn-client/pkg/secureurl"
 	"github.com/claimward/claimward-vpn-client/pkg/wgkey"
 	"github.com/claimward/claimward-vpn-client/pkg/wgtun"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -67,6 +68,11 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if len(c.Servers) == 0 {
 		return nil, fmt.Errorf("%s: no servers: the helper must be told which claimward-vpn-server it may connect to", path)
+	}
+	for _, s := range c.Servers {
+		if err := secureurl.Check(s); err != nil {
+			return nil, fmt.Errorf("%s: server %q: %w", path, s, err)
+		}
 	}
 	if c.Group == "" {
 		c.Group = DefaultGroup

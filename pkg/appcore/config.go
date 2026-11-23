@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/claimward/claimward-vpn-client/pkg/secureurl"
 )
 
 // Config is the app's runtime configuration: a JSON file under the user's
@@ -73,6 +75,9 @@ func (c *Config) Validate() error {
 	}
 	if len(missing) > 0 {
 		return errors.New("missing config: " + join(missing))
+	}
+	if err := secureurl.Check(c.ServerURL); err != nil {
+		return errors.New("server_url: " + err.Error())
 	}
 	return nil
 }
