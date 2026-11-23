@@ -7,17 +7,20 @@
 //   - Linux: the Secret Service (GNOME Keyring, KWallet), through secret-tool.
 //
 // A session written by an earlier version as a 0600 JSON file is moved into
-// the store on first load and the file deleted. On a machine with no secret
-// store (a headless Linux server) saving fails with ErrNoSecretStore, unless
-// CLAIMWARD_ALLOW_PLAINTEXT_SESSION=1 opts into the old 0600 file.
+// the store on first load and the file deleted. There is no plaintext
+// fallback: on a machine with no usable secret store (no Secret Service on a
+// headless Linux server, Keychain or DPAPI failing) saving fails with
+// ErrNoSecretStore, and no session file is ever written.
 package tokenstore
 
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -40,9 +43,22 @@ type Session struct {
 	Tenant string `json:"tenant,omitempty"`
 }
 
-// ErrNoSecretStore is returned by Save when the platform has no secret store
-// to hold the session and the plaintext opt-in is not set.
-var ErrNoSecretStore = errors.New("tokenstore: no secret store available (install a Secret Service such as gnome-keyring, or set CLAIMWARD_ALLOW_PLAINTEXT_SESSION=1 to keep a 0600 file)")
+// ErrNoSecretStore is returned when the platform has no usable secret store to
+// hold the session. Its text says what is missing on this platform.
+var ErrNoSecretStore = errors.New("tokenstore: no secret store available: " + storeHelp(runtime.GOOS))
+
+// storeHelp names what to install or unlock, per platform.
+func storeHelp(goos string) string {
+	switch goos {
+	case "linux":
+		return "the session is never written to disk in clear; install and unlock a Secret Service provider (such as gnome-keyring or KeePassXC) and make sure secret-tool is installed, then sign in again"
+	case "darwin":
+		return "the session is never written to disk in clear; unlock the login Keychain, then sign in again"
+	case "windows":
+		return "the session is never written to disk in clear; Windows DPAPI failed for this account, sign in to Windows as the user who runs the app, then sign in again"
+	}
+	return "the session is never written to disk in clear, and this platform has no supported secret store"
+}
 
 // errNotFound is a backend's "nothing stored".
 var errNotFound = errors.New("tokenstore: not found")
@@ -57,15 +73,6 @@ type backend interface {
 // store is the platform's backend; tests replace it.
 var store backend = platformBackend()
 
-// current is the backend in use: the 0600 file when the person opted into it,
-// the platform's secret store otherwise.
-func current() backend {
-	if plaintextAllowed() {
-		return fileBackend{}
-	}
-	return store
-}
-
 // Path returns the on-disk location of the legacy plaintext session file.
 func Path() (string, error) {
 	dir, err := os.UserConfigDir()
@@ -78,7 +85,7 @@ func Path() (string, error) {
 // Load reads the session. It returns (nil, nil) when no session exists yet.
 // A legacy plaintext file is migrated into the secret store and removed.
 func Load() (*Session, error) {
-	data, err := current().get()
+	data, err := store.get()
 	if errors.Is(err, errNotFound) {
 		return migrate()
 	}
@@ -92,24 +99,39 @@ func Load() (*Session, error) {
 	return &s, nil
 }
 
-// migrate moves a legacy plaintext file into the store.
+// migrate moves a legacy plaintext file into the store, once. The file is read
+// here and nowhere else. If the store refuses it, the file is deleted anyway
+// (the person signs in again): a plaintext copy is never kept, and never read
+// a second time.
 func migrate() (*Session, error) {
-	data, err := fileBackend{}.get()
-	if errors.Is(err, errNotFound) {
+	p, err := Path()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(p)
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
 	var s Session
-	if err := json.Unmarshal(data, &s); err != nil {
+	uerr := json.Unmarshal(data, &s)
+	var serr error
+	if uerr == nil {
+		serr = store.set(data)
+	}
+	if err := removeIfPresent(p); err != nil {
 		return nil, err
 	}
-	if err := store.set(data); err != nil {
-		return &s, nil // keep the file rather than lose the session
+	if uerr != nil {
+		return nil, uerr
 	}
-	if err := removeLegacy(); err != nil {
-		return nil, err
+	if serr != nil {
+		if errors.Is(serr, ErrNoSecretStore) {
+			return nil, serr
+		}
+		return nil, fmt.Errorf("%w: %v", ErrNoSecretStore, serr)
 	}
 	return &s, nil
 }
@@ -135,48 +157,22 @@ func removeIfPresent(p string) error {
 // plaintext file.
 func Save(s *Session) error {
 	data, _ := json.Marshal(s) // a Session holds only strings and a time: it cannot fail
-	if err := current().set(data); err != nil {
-		return err
-	}
-	if plaintextAllowed() {
-		return nil // the file just written is the store
+	if err := store.set(data); err != nil {
+		if errors.Is(err, ErrNoSecretStore) {
+			return err
+		}
+		return fmt.Errorf("%w: %v", ErrNoSecretStore, err)
 	}
 	return removeLegacy()
 }
 
 // Clear deletes the session (logout). A missing session is not an error.
 func Clear() error {
-	if err := current().del(); err != nil { // the legacy file is removed below either way
+	if err := store.del(); err != nil { // the legacy file is removed below either way
 		return err
 	}
 	return removeLegacy()
 }
-
-// fileBackend is the legacy 0600 JSON file: the fallback where the platform
-// has no secret store and the person opted in.
-type fileBackend struct{}
-
-func (fileBackend) get() ([]byte, error) {
-	p, err := Path()
-	if err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(p)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, errNotFound
-	}
-	return data, err
-}
-
-func (fileBackend) set(data []byte) error {
-	p, err := Path()
-	if err != nil {
-		return err
-	}
-	return writeAtomic(p, data)
-}
-
-func (fileBackend) del() error { return nil } // Clear removes the file
 
 // writeAtomic writes data to p with 0600 permissions, via a rename.
 func writeAtomic(p string, data []byte) error {
@@ -187,6 +183,3 @@ func writeAtomic(p string, data []byte) error {
 	}
 	return os.Rename(tmp, p)
 }
-
-// plaintextAllowed reports the opt-in for the 0600 file.
-func plaintextAllowed() bool { return os.Getenv("CLAIMWARD_ALLOW_PLAINTEXT_SESSION") == "1" }

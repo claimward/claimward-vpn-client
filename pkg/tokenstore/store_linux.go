@@ -8,7 +8,7 @@ import (
 )
 
 // platformBackend uses the Secret Service through secret-tool when it is
-// installed, and otherwise only the opt-in 0600 file.
+// installed, and otherwise refuses to keep a session (noStore).
 func platformBackend() backend {
 	if _, err := exec.LookPath("secret-tool"); err != nil {
 		return noStore{}

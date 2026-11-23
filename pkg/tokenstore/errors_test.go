@@ -56,7 +56,6 @@ func TestPathReportsAMissingConfigDir(t *testing.T) {
 
 func TestNoConfigDirIsReportedEverywhere(t *testing.T) {
 	noConfigDir(t)
-	t.Setenv("CLAIMWARD_ALLOW_PLAINTEXT_SESSION", "")
 	old := store
 	t.Cleanup(func() { store = old })
 
@@ -74,15 +73,6 @@ func TestNoConfigDirIsReportedEverywhere(t *testing.T) {
 	store = noStore{} // Load falls to the legacy file, whose path cannot be found
 	if _, err := Load(); err == nil {
 		t.Error("migrate: no error")
-	}
-
-	t.Setenv("CLAIMWARD_ALLOW_PLAINTEXT_SESSION", "1")
-	if _, err := Load(); err == nil {
-		t.Error("file Load: no error")
-	}
-	isPathErr(t, "file Save", Save(&Session{Bearer: "b"}))
-	if err := Clear(); err == nil {
-		t.Error("file Clear: no error")
 	}
 }
 
@@ -114,13 +104,6 @@ func TestAnUnreadableOrUnwritableConfigDirIsReported(t *testing.T) {
 	}
 	if err := Clear(); err == nil {
 		t.Error("sealed Clear: no error") // removing session.enc fails
-	}
-	t.Setenv("CLAIMWARD_ALLOW_PLAINTEXT_SESSION", "1")
-	if _, err := Load(); err == nil {
-		t.Error("file Load: no error")
-	}
-	if err := Save(&Session{Bearer: "b"}); err == nil {
-		t.Error("file Save: no error")
 	}
 }
 
@@ -190,30 +173,6 @@ func TestMigrateReportsAnUnreadableLegacyFile(t *testing.T) {
 	// The sealed read fails first on this layout, so go through migrate directly.
 	if _, err := migrate(); err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Errorf("migrate = %v, want the read error", err)
-	}
-}
-
-func TestPlaintextOptInNeverTouchesThePlatformStore(t *testing.T) {
-	isolate(t, nil)
-	sets := 0
-	store = brokenBackend{err: errors.New("the platform store was used"), sets: &sets}
-	t.Setenv("CLAIMWARD_ALLOW_PLAINTEXT_SESSION", "1")
-	if err := Save(&Session{Bearer: "b"}); err != nil {
-		t.Fatal(err)
-	}
-	if s, err := Load(); err != nil || s == nil {
-		t.Fatalf("Load = %v, %v", s, err)
-	}
-	if err := Clear(); err != nil {
-		t.Fatal(err)
-	}
-	if sets != 0 {
-		t.Errorf("the platform store was written %d times", sets)
-	}
-	// Without the opt-in the platform store is the one in use.
-	t.Setenv("CLAIMWARD_ALLOW_PLAINTEXT_SESSION", "")
-	if err := Save(&Session{Bearer: "b"}); err == nil {
-		t.Error("the platform store was not used")
 	}
 }
 

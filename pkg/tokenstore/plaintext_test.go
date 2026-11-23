@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -38,7 +39,6 @@ func isolate(t *testing.T, b backend) string {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("AppData", filepath.Join(home, "AppData"))
-	t.Setenv("CLAIMWARD_ALLOW_PLAINTEXT_SESSION", "")
 	old := store
 	store = b
 	t.Cleanup(func() { store = old })
@@ -151,50 +151,107 @@ func TestSaveRemovesTheLegacyFileAndClearRemovesEverything(t *testing.T) {
 	}
 }
 
-func TestNoSecretStoreRefusesToSaveAndKeepsTheLegacyFile(t *testing.T) {
+// Product decision 2026-11-23: there is no plaintext fallback. With no secret
+// store, saving fails and says what to install; nothing is written to disk.
+func TestNoSecretStoreRefusesToSaveAndWritesNothing(t *testing.T) {
 	dir := isolate(t, noStore{})
-	if err := Save(&Session{Bearer: "b"}); !errors.Is(err, ErrNoSecretStore) {
-		t.Fatalf("Save = %v, want ErrNoSecretStore", err)
+	err := Save(&Session{Bearer: "secret-b", WGPrivateKey: "secret-k"})
+	if err == nil || err.Error() != ErrNoSecretStore.Error() {
+		t.Fatalf("Save = %v, want exactly ErrNoSecretStore (not wrapped twice)", err)
 	}
-	if _, found := dirHolds(t, dir, "b"); found {
+	if _, found := dirHolds(t, dir, "secret-b", "secret-k"); found {
 		t.Error("a refused Save wrote the session")
 	}
-	_ = os.MkdirAll(dir, 0o700)
-	legacy := filepath.Join(dir, "session.json")
-	if err := os.WriteFile(legacy, []byte(`{"bearer":"kept"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	got, err := Load()
-	if err != nil || got == nil || got.Bearer != "kept" {
-		t.Fatalf("Load = %+v, %v", got, err)
-	}
-	if _, err := os.Stat(legacy); err != nil {
-		t.Errorf("the file was removed although nothing took the session: %v", err)
+	if _, err := os.Stat(dir); err == nil {
+		t.Errorf("a refused Save created %s", dir)
 	}
 }
 
-func TestPlaintextOptInUsesA0600File(t *testing.T) {
+// The message names what is missing, for the platform it runs on.
+func TestTheNoStoreErrorIsActionable(t *testing.T) {
+	for goos, want := range map[string]string{
+		"linux":   "Secret Service provider (such as gnome-keyring or KeePassXC)",
+		"darwin":  "unlock the login Keychain",
+		"windows": "DPAPI",
+		"plan9":   "no supported secret store",
+	} {
+		if got := storeHelp(goos); !strings.Contains(got, want) || !strings.Contains(got, "never written to disk in clear") {
+			t.Errorf("storeHelp(%q) = %q, want %q", goos, got, want)
+		}
+	}
+	if !strings.Contains(ErrNoSecretStore.Error(), "no secret store available") {
+		t.Errorf("ErrNoSecretStore = %q", ErrNoSecretStore)
+	}
+	if strings.Contains(ErrNoSecretStore.Error(), "PLAINTEXT") {
+		t.Error("the error still mentions the opt-in")
+	}
+}
+
+// A backend that fails with its own error still surfaces as ErrNoSecretStore.
+func TestAStoreFailureIsReportedAsNoSecretStore(t *testing.T) {
+	isolate(t, brokenBackend{err: errors.New("keychain locked")})
+	err := Save(&Session{Bearer: "b"})
+	if !errors.Is(err, ErrNoSecretStore) || !strings.Contains(err.Error(), "keychain locked") {
+		t.Errorf("Save = %v", err)
+	}
+}
+
+// The old opt-in variable has no effect any more: no file is written, with or
+// without it, and a legacy file is not read back as the session.
+func TestTheOptInVariableHasNoEffect(t *testing.T) {
+	for _, v := range []string{"", "1", "true"} {
+		dir := isolate(t, noStore{})
+		t.Setenv("CLAIMWARD_ALLOW_PLAINTEXT_SESSION", v)
+		if err := Save(&Session{Bearer: "plain-secret"}); !errors.Is(err, ErrNoSecretStore) {
+			t.Fatalf("value %q: Save = %v, want ErrNoSecretStore", v, err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "session.json")); err == nil {
+			t.Errorf("value %q: a session.json was written", v)
+		}
+		if s, err := Load(); s != nil || err != nil {
+			t.Errorf("value %q: Load = %+v, %v", v, s, err)
+		}
+	}
+}
+
+// Migration is one attempt. If the store refuses, the plaintext file is
+// deleted anyway, never kept and never read a second time, and Load refuses.
+func TestAFailedMigrationDeletesTheLegacyFile(t *testing.T) {
 	dir := isolate(t, noStore{})
-	t.Setenv("CLAIMWARD_ALLOW_PLAINTEXT_SESSION", "1")
-	if err := Save(&Session{Bearer: "plain"}); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	fi, err := os.Stat(filepath.Join(dir, "session.json"))
-	if err != nil {
+	legacy := filepath.Join(dir, "session.json")
+	if err := os.WriteFile(legacy, []byte(`{"bearer":"old-secret"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if runtimeHasUnixModes() && fi.Mode().Perm() != 0o600 {
-		t.Errorf("mode %v, want 0600", fi.Mode().Perm())
+	if s, err := Load(); s != nil || err == nil || err.Error() != ErrNoSecretStore.Error() {
+		t.Fatalf("Load = %+v, %v, want exactly ErrNoSecretStore", s, err)
 	}
-	got, err := Load()
-	if err != nil || got == nil || got.Bearer != "plain" {
-		t.Fatalf("Load = %+v, %v", got, err)
+	if _, err := os.Stat(legacy); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the plaintext file was kept: %v", err)
 	}
-	if err := Clear(); err != nil {
+	if s, err := Load(); s != nil || err != nil {
+		t.Errorf("second Load = %+v, %v, want nothing", s, err)
+	}
+}
+
+// A store failing with its own error during migration is reported as no store.
+func TestAMigrationFailingWithAStoreErrorIsReported(t *testing.T) {
+	dir := isolate(t, brokenBackend{err: errors.New("keychain locked")})
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if s, _ := Load(); s != nil {
-		t.Error("session survives Clear")
+	legacy := filepath.Join(dir, "session.json")
+	if err := os.WriteFile(legacy, []byte(`{"bearer":"old"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// brokenBackend.get fails too, so go through migrate directly.
+	if s, err := migrate(); s != nil || !errors.Is(err, ErrNoSecretStore) || !strings.Contains(err.Error(), "keychain locked") {
+		t.Fatalf("migrate = %+v, %v", s, err)
+	}
+	if _, err := os.Stat(legacy); err == nil {
+		t.Error("the plaintext file was kept")
 	}
 }
 
