@@ -92,6 +92,20 @@ func socketGroup(group string) (string, error) {
 // a handle opened in that moment.
 func createSecured(dir, sddl string) error {
 	if _, err := os.Lstat(dir); err == nil {
+		// A directory that was there before is adopted only when SYSTEM or
+		// the Administrators own it. ProgramData lets every user create a
+		// directory, which that user owns -- and a handle they opened
+		// beforehand with WRITE_DAC keeps that right through any ACL we set
+		// afterwards. (Audit 2026-11-23.) Such a directory is refused; an
+		// administrator removes it.
+		owner, oerr := pathOwner(dir)
+		if oerr != nil {
+			return fmt.Errorf("%s: %w", dir, oerr)
+		}
+		if !trusted(owner) {
+			return fmt.Errorf("%s already exists and is owned by %s, not SYSTEM or the Administrators: "+
+				"refusing to adopt it (an administrator must remove it)", dir, owner)
+		}
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -160,6 +174,22 @@ func checkOwner(path string) error {
 		return err
 	}
 	return checkPath(path)
+}
+
+// pathOwner is the SID, as a string, of the owner of a file or directory.
+func pathOwner(path string) (string, error) {
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return "", err
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return "", err
+	}
+	if owner == nil {
+		return "", errors.New("it has no owner")
+	}
+	return owner.String(), nil
 }
 
 // checkPath reads a file's or directory's owner and DACL and hands them to

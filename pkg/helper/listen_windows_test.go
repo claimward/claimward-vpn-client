@@ -133,7 +133,7 @@ func TestListenTightensAnExistingDirectory(t *testing.T) {
 	if err := os.Mkdir(dir, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	setSDDL(t, dir, "O:BUG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;BU)")
+	setSDDL(t, dir, "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;BU)")
 	if err := checkPath(dir); err == nil {
 		t.Fatal("the loose directory passes the check before Listen")
 	}
@@ -144,6 +144,21 @@ func TestListenTightensAnExistingDirectory(t *testing.T) {
 	ln.Close()
 	if err := checkPath(dir); err != nil {
 		t.Errorf("after Listen: %v", err)
+	}
+}
+
+// An existing directory owned by Users is somebody else's: refused, not
+// tightened (see TestListenRefusesADirectorySomebodyElseCreated).
+func TestListenRefusesADirectoryOwnedByUsers(t *testing.T) {
+	privileged(t)
+	dir := filepath.Join(shortDir(t), "Claimward")
+	if err := os.Mkdir(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	setSDDL(t, dir, "O:BUG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;BU)")
+	if ln, err := Listen(filepath.Join(dir, "helper.sock"), ""); err == nil {
+		ln.Close()
+		t.Fatal("a directory owned by Users was adopted")
 	}
 }
 
