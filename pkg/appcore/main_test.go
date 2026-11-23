@@ -3,11 +3,15 @@ package appcore
 import (
 	"os"
 	"testing"
+
+	"github.com/claimward/claimward-vpn-client/pkg/tokenstore"
 )
 
-// The tests keep the session in the 0600 file: the platform's secret store is
-// the person's own Keychain, Credential Store or Secret Service.
+// The tests keep the session in memory: the platform's secret store is the
+// person's own Keychain, Credential Store or Secret Service.
 func TestMain(m *testing.M) {
-	os.Setenv("CLAIMWARD_ALLOW_PLAINTEXT_SESSION", "1")
-	os.Exit(m.Run())
+	restore := tokenstore.UseMemory()
+	code := m.Run()
+	restore()
+	os.Exit(code)
 }

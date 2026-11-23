@@ -261,9 +261,16 @@ The helper's own `helper.json` takes `servers` (required), `group` (default
   as macOS, with the key in the Secret Service (`secret-tool`, from
   libsecret). Files live under the config dir (`os.UserConfigDir()`/claimward).
   A `session.json` written by an earlier version is moved into the store on
-  first load and deleted. On a machine with no secret store (a headless Linux
-  server) saving fails with `ErrNoSecretStore`; setting
-  `CLAIMWARD_ALLOW_PLAINTEXT_SESSION=1` opts into the old 0600 JSON file.
+  first load and deleted; that is one attempt, and if the store refuses it the
+  file is deleted anyway (sign in again), never kept and never read twice.
+  **There is no plaintext fallback.** With no usable secret store (no Secret
+  Service on a headless Linux machine, a locked or unavailable Keychain, a DPAPI
+  failure) signing in fails with `ErrNoSecretStore`, whose message says what to
+  install or unlock (on Linux: a Secret Service provider such as gnome-keyring
+  or KeePassXC, and `secret-tool`); the session is not kept even in memory, and
+  no session file is written. `CLAIMWARD_ALLOW_PLAINTEXT_SESSION`, which v0.4.0
+  honoured, is ignored from v0.5.0 (breaking for setups that relied on it).
+  Tests of other packages use `tokenstore.UseMemory()`, a store held in memory.
 - Creating the tun device and changing routes (`pkg/wgtun`) require elevated
   privileges; each app delegates this to its privileged helper (`pkg/helper`).
 - `pkg/wgtun` implements macOS, Linux and Windows. On Windows the device is a
