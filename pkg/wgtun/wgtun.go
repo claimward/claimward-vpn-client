@@ -131,7 +131,7 @@ func Up(cfg Config) (*Tunnel, error) {
 	}
 	ips, _ := canonPrefixes(cfg.AllowedIPs)
 	cfg.AllowedIPs = ips
-	cfg.MTU = clampMTU(cfg.MTU)
+	cfg.MTU = tunnelMTU(cfg.MTU, cfg.Endpoint)
 	mtu := cfg.MTU
 	tunDev, err := tun.CreateTUN(tunName, mtu)
 	if err != nil {

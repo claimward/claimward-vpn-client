@@ -22,7 +22,7 @@ library they share.
 | `pkg/browser` | Opens a URL in the user's default browser using absolute opener paths, so it works from GUI apps launched by LaunchServices |
 | `pkg/client` | High-level client: `Enroll`/`Heartbeat`/`Deregister`/`Tenants` against the server, plus `TunnelConfig` to turn an `EnrollResponse` into a `wgtun.Config` |
 | `pkg/wgkey` | WireGuard key generation / parsing |
-| `pkg/wgtun` | Userspace WireGuard tunnel via `wireguard-go` (+ interface, route and DNS setup: darwin and Linux with their tools, Windows on a Wintun adapter through `winipcfg`); needs elevated privileges |
+| `pkg/wgtun` | Userspace WireGuard tunnel via `wireguard-go` (+ interface, route and DNS setup: darwin and Linux with their tools, Windows on a Wintun adapter through `winipcfg`); needs elevated privileges. The tunnel MTU is the server's `mtu` (1420 if absent), lowered to the MTU of the local link that reaches the endpoint minus 60 (IPv4) or 80 (IPv6), never above the server's value and never below 1280 — an MTU that does not fit the path loses GSO-coalesced segments and stalls TCP on 200 ms timeouts |
 | `pkg/routeclient` | Watches the server's RouteService (gRPC) and reports live route updates without re-enrolling |
 | `pkg/routespb` | Generated gRPC/protobuf stubs for the RouteService (shared with the server) |
 | `pkg/appcore` | The app's business logic, shared by the macOS, Linux and Windows apps: sign-in, the **tenant chosen for the session**, connect/disconnect through the helper, status for the UI |
