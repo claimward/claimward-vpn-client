@@ -47,27 +47,40 @@ func localLinkMTU(addr netip.AddrPort) int {
 		return 0
 	}
 	defer c.Close()
-	la, ok := c.LocalAddr().(*net.UDPAddr)
-	if !ok {
-		return 0
-	}
-	src, ok := netip.AddrFromSlice(la.IP)
-	if !ok {
-		return 0
-	}
-	src = src.Unmap()
-	ifs, err := net.Interfaces()
-	if err != nil {
-		return 0
-	}
+	la, _ := c.LocalAddr().(*net.UDPAddr) // always a *net.UDPAddr for DialUDP
+	return mtuOfSource(la.AddrPort().Addr().Unmap(), systemLinks())
+}
+
+// link is one interface: its MTU and the prefixes configured on it.
+type link struct {
+	mtu   int
+	addrs []netip.Prefix
+}
+
+// systemLinks lists the interfaces. An interface whose addresses cannot be
+// read lists none, and an address that does not parse is the zero prefix,
+// which matches no source address.
+func systemLinks() []link {
+	ifs, _ := net.Interfaces()
+	out := make([]link, 0, len(ifs))
 	for _, ifc := range ifs {
-		addrs, err := ifc.Addrs()
-		if err != nil {
-			continue
-		}
+		l := link{mtu: ifc.MTU}
+		addrs, _ := ifc.Addrs()
 		for _, a := range addrs {
-			if p, err := netip.ParsePrefix(a.String()); err == nil && p.Addr().Unmap() == src {
-				return ifc.MTU
+			p, _ := netip.ParsePrefix(a.String())
+			l.addrs = append(l.addrs, p)
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
+// mtuOfSource is the MTU of the link holding src, 0 when none does.
+func mtuOfSource(src netip.Addr, links []link) int {
+	for _, l := range links {
+		for _, p := range l.addrs {
+			if p.Addr().Unmap() == src {
+				return l.mtu
 			}
 		}
 	}

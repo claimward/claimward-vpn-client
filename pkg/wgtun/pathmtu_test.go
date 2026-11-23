@@ -45,8 +45,37 @@ func TestTunnelMTU(t *testing.T) {
 	}
 }
 
-func TestLocalLinkMTULoopback(t *testing.T) {
+func TestMTUOfSource(t *testing.T) {
+	links := []link{
+		{mtu: 1500, addrs: []netip.Prefix{netip.MustParsePrefix("192.0.2.5/24")}},
+		{mtu: 1450, addrs: []netip.Prefix{netip.MustParsePrefix("fe80::1/64"), netip.MustParsePrefix("::ffff:198.51.100.7/120")}},
+	}
+	for _, c := range []struct {
+		src  string
+		want int
+	}{
+		{"192.0.2.5", 1500},
+		{"fe80::1", 1450},
+		{"198.51.100.7", 1450},
+		{"203.0.113.1", 0},
+	} {
+		if got := mtuOfSource(netip.MustParseAddr(c.src), links); got != c.want {
+			t.Errorf("mtuOfSource(%s) = %d, want %d", c.src, got, c.want)
+		}
+	}
+}
+
+func TestSystemLinksFindsLoopback(t *testing.T) {
+	if got := mtuOfSource(netip.MustParseAddr("127.0.0.1"), systemLinks()); got <= 0 {
+		t.Skipf("no interface holds 127.0.0.1 here")
+	}
 	if got := localLinkMTU(netip.MustParseAddrPort("127.0.0.1:9")); got <= 0 {
-		t.Skipf("loopback MTU not readable here: %d", got)
+		t.Errorf("localLinkMTU(loopback) = %d, want the loopback interface MTU", got)
+	}
+}
+
+func TestLocalLinkMTUUnreachable(t *testing.T) {
+	if got := localLinkMTU(netip.AddrPort{}); got != 0 {
+		t.Errorf("localLinkMTU(zero) = %d, want 0", got)
 	}
 }
