@@ -183,9 +183,7 @@ func (fileBackend) del() error { return nil } // Clear removes the file
 
 // writeAtomic writes data to p with 0600 permissions, via a rename.
 func writeAtomic(p string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return err
-	}
+	os.MkdirAll(filepath.Dir(p), 0o700) // a failure shows as WriteFile's own error
 	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
