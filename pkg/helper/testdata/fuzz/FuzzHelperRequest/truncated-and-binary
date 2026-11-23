@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"action\":\"tenants\",\"connect\":{\"bearer\":\"\x00\xff\"")

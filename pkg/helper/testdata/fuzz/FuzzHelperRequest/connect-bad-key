@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"action\":\"connect\",\"connect\":{\"server_url\":\"https://x\",\"bearer\":\"b\",\"private_key\":\"!!\"}}")
