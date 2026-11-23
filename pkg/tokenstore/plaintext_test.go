@@ -156,8 +156,8 @@ func TestSaveRemovesTheLegacyFileAndClearRemovesEverything(t *testing.T) {
 func TestNoSecretStoreRefusesToSaveAndWritesNothing(t *testing.T) {
 	dir := isolate(t, noStore{})
 	err := Save(&Session{Bearer: "secret-b", WGPrivateKey: "secret-k"})
-	if !errors.Is(err, ErrNoSecretStore) {
-		t.Fatalf("Save = %v, want ErrNoSecretStore", err)
+	if err == nil || err.Error() != ErrNoSecretStore.Error() {
+		t.Fatalf("Save = %v, want exactly ErrNoSecretStore (not wrapped twice)", err)
 	}
 	if _, found := dirHolds(t, dir, "secret-b", "secret-k"); found {
 		t.Error("a refused Save wrote the session")
@@ -225,8 +225,8 @@ func TestAFailedMigrationDeletesTheLegacyFile(t *testing.T) {
 	if err := os.WriteFile(legacy, []byte(`{"bearer":"old-secret"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if s, err := Load(); s != nil || !errors.Is(err, ErrNoSecretStore) {
-		t.Fatalf("Load = %+v, %v, want ErrNoSecretStore", s, err)
+	if s, err := Load(); s != nil || err == nil || err.Error() != ErrNoSecretStore.Error() {
+		t.Fatalf("Load = %+v, %v, want exactly ErrNoSecretStore", s, err)
 	}
 	if _, err := os.Stat(legacy); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("the plaintext file was kept: %v", err)
