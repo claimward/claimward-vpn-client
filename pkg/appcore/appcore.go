@@ -101,6 +101,13 @@ func (c *Core) UpdateConfig(in Config) error {
 	if in.Provider == "" {
 		in.Provider = "github"
 	}
+	// The helper's socket is fixed when the app starts (the file, or the
+	// CLAIMWARD_HELPER_SOCKET environment variable): a configuration coming
+	// from a UI must not be able to point the app, and the bearer and the
+	// WireGuard key it sends, at a socket of its choosing. (Audit 2026-11-23.)
+	c.mu.Lock()
+	in.SocketPath = c.cfg.SocketPath
+	c.mu.Unlock()
 	if err := SaveConfig(&in); err != nil {
 		return err
 	}
