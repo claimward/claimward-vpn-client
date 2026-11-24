@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -193,6 +194,7 @@ type Model struct {
 
 	notifyMu sync.Mutex // orders publications
 	subs     map[int]func(State)
+	evsubs   map[int]func(Event)
 	nextSub  int
 
 	mu           sync.Mutex // guards everything below
@@ -205,6 +207,8 @@ type Model struct {
 	settingsErr  string
 	configPath   string
 	cancel       context.CancelFunc
+	userDown     bool    // the person's own Disconnect or SignOut runs
+	pending      []Event // events noted, not yet published
 }
 
 // New builds a Model. Call Start to begin polling.
@@ -222,7 +226,7 @@ func New(svc Service, o Options) *Model {
 	return &Model{
 		svc: svc, open: o.Open, configPath: o.ConfigPath,
 		interval: o.Interval, fastInterval: o.FastInterval,
-		ctx: ctx, stop: stop, subs: map[int]func(State){},
+		ctx: ctx, stop: stop, subs: map[int]func(State){}, evsubs: map[int]func(Event){},
 	}
 }
 
@@ -248,13 +252,77 @@ func (m *Model) State() State {
 	return m.snapshot()
 }
 
-// publish hands the current State to the subscribers.
+// EventKind says what happened.
+type EventKind int
+
+// The events.
+const (
+	// EventDropped: the tunnel went down without the person asking.
+	EventDropped EventKind = iota + 1
+	// EventSessionExpired: the session ended without the person signing out.
+	EventSessionExpired
+)
+
+// Event is something worth telling the person who is not looking at the
+// window: an app turns it into a tray notification, and a click on that
+// notification into bringing the window forward. Events are published on
+// transitions only, never once per poll.
+type Event struct {
+	Kind        EventKind `json:"kind"`
+	Title, Body string
+}
+
+// SubscribeEvents calls fn with every Event, in order, under the same
+// contract as Subscribe, and returns what ends the subscription.
+func (m *Model) SubscribeEvents(fn func(Event)) (cancel func()) {
+	m.notifyMu.Lock()
+	defer m.notifyMu.Unlock()
+	id := m.nextSub
+	m.nextSub++
+	m.evsubs[id] = fn
+	return func() {
+		m.notifyMu.Lock()
+		defer m.notifyMu.Unlock()
+		delete(m.evsubs, id)
+	}
+}
+
+// setStatusLocked records a status and notes the event its change makes. The
+// caller holds m.mu. A tunnel or session that ends while the person's own
+// Disconnect or SignOut runs is not an event.
+func (m *Model) setStatusLocked(st appcore.Status) {
+	prev, had := m.st, m.haveStatus
+	m.st, m.haveStatus = st, true
+	if !had || m.userDown {
+		return
+	}
+	switch {
+	case prev.LoggedIn && !st.LoggedIn:
+		m.pending = append(m.pending, Event{Kind: EventSessionExpired,
+			Title: "Claimward: signed out", Body: "Your session expired. Sign in again to connect."})
+	case prev.Connected && !st.Connected:
+		m.pending = append(m.pending, Event{Kind: EventDropped,
+			Title: "Claimward: disconnected", Body: "The VPN connection dropped. Open Claimward to connect again."})
+	}
+}
+
+// publish hands the current State, then the events it brought, to the
+// subscribers.
 func (m *Model) publish() {
 	m.notifyMu.Lock()
 	defer m.notifyMu.Unlock()
-	s := m.State()
+	m.mu.Lock()
+	s := m.snapshot()
+	events := m.pending
+	m.pending = nil
+	m.mu.Unlock()
 	for _, fn := range m.subs {
 		fn(s)
+	}
+	for _, e := range events {
+		for _, fn := range m.evsubs {
+			fn(e)
+		}
 	}
 }
 
@@ -291,7 +359,7 @@ func (m *Model) Refresh() { m.Apply(m.svc.Status()) }
 // Apply shows a status.
 func (m *Model) Apply(st appcore.Status) {
 	m.mu.Lock()
-	m.st, m.haveStatus = st, true
+	m.setStatusLocked(st)
 	m.mu.Unlock()
 	m.publish()
 }
@@ -345,7 +413,8 @@ func (m *Model) run(ok func(Can) bool, busy string, pre func(), work func(contex
 		m.cancel = nil
 		m.fast.Store(false)
 		m.busy = ""
-		m.st, m.haveStatus = st, true
+		m.setStatusLocked(st)
+		m.userDown = false
 		done(err)
 		m.mu.Unlock()
 		m.publish()
@@ -436,7 +505,7 @@ func (m *Model) Connect() {
 
 // Disconnect takes the tunnel down.
 func (m *Model) Disconnect() {
-	m.run(func(c Can) bool { return c.Disconnect }, "Disconnecting…", nil, m.svc.Disconnect,
+	m.run(func(c Can) bool { return c.Disconnect }, "Disconnecting…", func() { m.userDown = true }, m.svc.Disconnect,
 		func(err error) {
 			if err != nil {
 				m.err = "Disconnecting failed: " + err.Error()
@@ -446,7 +515,7 @@ func (m *Model) Disconnect() {
 
 // SignOut forgets the session.
 func (m *Model) SignOut() {
-	m.run(func(c Can) bool { return c.SignOut }, "Signing out…", nil, m.svc.Logout,
+	m.run(func(c Can) bool { return c.SignOut }, "Signing out…", func() { m.userDown = true }, m.svc.Logout,
 		func(err error) {
 			if err != nil {
 				m.err = "Signing out failed: " + err.Error()
@@ -700,13 +769,8 @@ func tenantName(t hproto.Tenant) string {
 // is not a continuation) it returns the lines to append and true; otherwise
 // the lines to show instead of shown, and false.
 func LogDelta(shown, next []string) (lines []string, appended bool) {
-	if len(next) < len(shown) {
+	if !slices.Equal(shown, next[:min(len(shown), len(next))]) {
 		return next, false
-	}
-	for i := range shown {
-		if shown[i] != next[i] {
-			return next, false
-		}
 	}
 	return next[len(shown):], true
 }

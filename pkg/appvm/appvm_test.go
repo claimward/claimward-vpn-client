@@ -295,8 +295,8 @@ func TestConnectDisconnectSignOut(t *testing.T) {
 		t.Fatal(s.Error)
 	}
 	want := []string{"connect", "connect", "connect", "disconnect", "disconnect", "logout", "logout"}
-	if !reflect.DeepEqual(h.f.calls, want) {
-		t.Fatalf("%v", h.f.calls)
+	if !reflect.DeepEqual(h.f.log(), want) {
+		t.Fatalf("%v", h.f.log())
 	}
 }
 
@@ -332,14 +332,14 @@ func TestTenants(t *testing.T) {
 	}
 	h.SelectTenant(1)
 	s = h.State()
-	if s.TenantIndex != 1 || s.Tenant != "Tenant: Acme (acme)" || s.Error != "" || h.f.calls[len(h.f.calls)-1] != "settenant:acme" {
+	if s.TenantIndex != 1 || s.Tenant != "Tenant: Acme (acme)" || s.Error != "" || h.f.log()[len(h.f.log())-1] != "settenant:acme" {
 		t.Fatalf("%+v", s)
 	}
-	n := len(h.f.calls)
+	n := len(h.f.log())
 	h.SelectTenant(1)  // already chosen
 	h.SelectTenant(9)  // out of range
 	h.SelectTenant(-1) // out of range
-	if len(h.f.calls) != n {
+	if len(h.f.log()) != n {
 		t.Fatal("no call expected")
 	}
 	h.f.setTenantErr = errors.New("disk")
@@ -352,9 +352,9 @@ func TestTenants(t *testing.T) {
 	h.f.setTenantErr = nil
 	h.f.set(func(s *appcore.Status) { s.Connected, s.Tenant = true, "acme" })
 	h.Refresh()
-	n = len(h.f.calls)
+	n = len(h.f.log())
 	h.SelectTenant(2)
-	if len(h.f.calls) != n || !h.State().TenantLocked {
+	if len(h.f.log()) != n || !h.State().TenantLocked {
 		t.Fatal("locked")
 	}
 	// An unlisted tenant, and a server choice.
@@ -371,8 +371,8 @@ func TestSettings(t *testing.T) {
 	h.Refresh()
 	h.SaveSettings(Form{}) // not open: ignored
 	h.CloseSettings()      // not open: ignored
-	if len(h.f.calls) != 0 {
-		t.Fatal(h.f.calls)
+	if len(h.f.log()) != 0 {
+		t.Fatal(h.f.log())
 	}
 	f, ok := h.OpenSettings()
 	if !ok || f.Provider != "go-authn" || f.ServerURL != "https://vpn" || f.GitHubClientID != "g" || f.OIDCIssuer != "https://i" || f.OIDCClientID != "c" {
@@ -536,4 +536,119 @@ func TestLogInState(t *testing.T) {
 	if h.State().Log[0] != "1" {
 		t.Fatal("State shares its log with the Model")
 	}
+}
+
+func collectEvents(m *Model) (get func() []Event, cancel func()) {
+	var mu sync.Mutex
+	var evs []Event
+	cancel = m.SubscribeEvents(func(e Event) { mu.Lock(); evs = append(evs, e); mu.Unlock() })
+	return func() []Event { mu.Lock(); defer mu.Unlock(); return append([]Event(nil), evs...) }, cancel
+}
+
+func TestEventsOnTransitionsOnly(t *testing.T) {
+	h := newHarness(t, up)
+	get, cancel := collectEvents(h.Model)
+	h.Refresh() // the first status is no transition
+	h.Refresh()
+	if len(get()) != 0 {
+		t.Fatal(get())
+	}
+	h.f.set(func(s *appcore.Status) { s.Connected = false })
+	for range 10 {
+		h.Refresh()
+	}
+	if ev := get(); len(ev) != 1 || ev[0].Kind != EventDropped || ev[0].Title == "" || ev[0].Body == "" {
+		t.Fatalf("10 polls in the dropped state: %+v", ev)
+	}
+	// Up again, then the session expires under a running tunnel.
+	h.f.set(func(s *appcore.Status) { s.Connected = true })
+	h.Refresh()
+	h.f.set(func(s *appcore.Status) { s.Connected, s.LoggedIn = false, false })
+	for range 3 {
+		h.Refresh()
+	}
+	if ev := get(); len(ev) != 2 || ev[1].Kind != EventSessionExpired {
+		t.Fatalf("%+v", ev)
+	}
+	cancel()
+	h.f.set(func(s *appcore.Status) { *s = up })
+	h.Refresh()
+	h.f.set(func(s *appcore.Status) { s.Connected = false })
+	h.Refresh()
+	if len(get()) != 2 {
+		t.Fatal("notified after cancel")
+	}
+}
+
+func TestOwnDisconnectAndSignOutAreNoEvents(t *testing.T) {
+	h := newHarness(t, up)
+	h.Refresh()
+	get, _ := collectEvents(h.Model)
+	h.f.disconnectErr = nil
+	h.f.set(func(s *appcore.Status) {}) // the fake keeps reporting up: the tunnel is not really down
+	h.Disconnect()
+	h.settle(t)
+	// The status the action ends with says down: the person asked for it.
+	h.f.gate = make(chan struct{})
+	h.Apply(up)
+	h.f.set(func(s *appcore.Status) { s.Connected = false })
+	h.Disconnect()
+	h.settle(t)
+	h.Apply(up)
+	h.f.set(func(s *appcore.Status) { s.Connected, s.LoggedIn = false, false })
+	h.SignOut()
+	h.settle(t)
+	if len(get()) != 0 {
+		t.Fatalf("%+v", get())
+	}
+	// The flag does not outlive the action.
+	h.Apply(up)
+	h.Apply(signedOut)
+	if ev := get(); len(ev) != 1 || ev[0].Kind != EventSessionExpired {
+		t.Fatalf("%+v", ev)
+	}
+}
+
+func TestRefusedCommandsDoNothing(t *testing.T) {
+	h := newHarness(t, signedOut)
+	h.Refresh()
+	h.Connect()
+	h.Disconnect()
+	h.SignOut()
+	h.ChooseTenant()
+	h.OpenSignInPage()
+	if len(h.f.log()) != 0 || h.State().Busy != "" || h.State().Error != "" || len(h.opened) != 0 {
+		t.Fatalf("%v %+v", h.f.log(), h.State())
+	}
+	// A tenant choice while an action runs, and one that moves nothing.
+	h.f.st = signedIn
+	h.f.st.Tenants = []hproto.Tenant{{ID: "a"}, {ID: "b"}}
+	h.f.gate = make(chan struct{})
+	h.Apply(appcore.Status{ConfigOK: true, HelperInstalled: true})
+	h.SignIn()
+	before := h.State()
+	h.SelectTenant(1)
+	if after := h.State(); !reflect.DeepEqual(before, after) || len(h.f.log()) != 1 {
+		t.Fatalf("%v", h.f.log())
+	}
+	close(h.f.gate)
+	h.settle(t)
+	h.Apply(h.f.st)
+	h.SelectTenant(0) // already the chosen row
+	h.SelectTenant(1)
+	h.SelectTenant(len(h.State().TenantOptions))
+	if got := h.f.log()[len(h.f.log())-1]; got != "settenant:a" {
+		t.Fatal(got)
+	}
+	n := len(h.f.log())
+	h.SelectTenant(-1)
+	if len(h.f.log()) != n {
+		t.Fatal("negative row")
+	}
+}
+
+func (f *fake) log() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
 }
