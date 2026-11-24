@@ -100,7 +100,13 @@ func (h *harness) settle(t *testing.T) State {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	h.wg.Wait()
+	done := make(chan struct{})
+	go func() { h.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("an action is still running: one that should have been refused?")
+	}
 	return h.State()
 }
 

@@ -530,13 +530,17 @@ func (m *Model) SignOut() {
 // the failure in State.Error.
 func (m *Model) SelectTenant(i int) {
 	m.mu.Lock()
-	opts := m.optionsLocked()
-	if m.st.Connected || m.busy != "" || i < 0 || i >= len(opts) || opts[i].ID == m.st.Tenant {
+	id, found := "", false
+	for j, o := range m.optionsLocked() {
+		if j == i {
+			id, found = o.ID, true
+		}
+	}
+	if !found || m.st.Connected || m.busy != "" || id == m.st.Tenant {
 		m.mu.Unlock()
 		m.publish() // a view that moved its selection is put back
 		return
 	}
-	id := opts[i].ID
 	m.mu.Unlock()
 	err := m.svc.SetTenant(id)
 	m.mu.Lock()
@@ -772,5 +776,5 @@ func LogDelta(shown, next []string) (lines []string, appended bool) {
 	if !slices.Equal(shown, next[:min(len(shown), len(next))]) {
 		return next, false
 	}
-	return next[len(shown):], true
+	return next[min(len(shown), len(next)):], true
 }
