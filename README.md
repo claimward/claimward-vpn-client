@@ -27,6 +27,7 @@ library they share.
 | `pkg/routeclient` | Watches the server's RouteService (gRPC) and reports live route updates without re-enrolling |
 | `pkg/routespb` | Generated gRPC/protobuf stubs for the RouteService (shared with the server) |
 | `pkg/appcore` | The app's business logic, shared by the macOS, Linux and Windows apps: sign-in, the **tenant chosen for the session**, connect/disconnect through the helper, status for the UI |
+| `pkg/appvm` | The apps' view model over `pkg/appcore`, shared by the Linux, Windows and macOS apps and free of any UI toolkit: one `State` snapshot (screen, status lines, sign-in prompt, tenant choice, log, which commands may run) published to subscribers, and the commands (sign in, connect, choose a tenant, settings, ...). The browser is injected (`Options.Open`). Tested headless, under the race detector, at 100 % coverage |
 | `pkg/helper` | The privileged helper (root / SYSTEM), shared by the three apps: enrolls, owns the tunnel, keeps the server's lease, watches route pushes. Each app's helper binary is a `main` that loads its configuration and listens |
 | `pkg/hproto`, `pkg/helperclient` | The helper's socket protocol (`connect`, `tenants`, `renew`, `down`, `status`) and the app's client for it |
 | `pkg/tokenstore` | session store in the platform secret store (Keychain, DPAPI, Secret Service; auth tokens, device key, chosen tenant), used by `pkg/appcore` in all three apps |

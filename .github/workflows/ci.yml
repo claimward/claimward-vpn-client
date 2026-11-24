@@ -30,6 +30,18 @@ jobs:
       - run: go vet ./...
       - run: CGO_ENABLED=0 go test -count=1 ./...
 
+  # The apps' shared view model: under the race detector, and covered fully.
+  appvm:
+    name: appvm (race, 100% coverage)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.4'
+      - run: go test -race -count=1 -coverprofile=appvm.out ./pkg/appvm
+      - run: go tool cover -func=appvm.out | grep -q 'total:.*100.0%'
+
   # Known vulnerabilities in what the module imports and calls.
   govulncheck:
     name: govulncheck
