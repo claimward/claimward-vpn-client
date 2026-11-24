@@ -626,6 +626,9 @@ func TestRefusedCommandsDoNothing(t *testing.T) {
 	h.f.gate = make(chan struct{})
 	h.Apply(appcore.Status{ConfigOK: true, HelperInstalled: true})
 	h.SignIn()
+	for len(h.f.log()) == 0 { // Login is under way, waiting for the gate
+		time.Sleep(time.Millisecond)
+	}
 	before := h.State()
 	h.SelectTenant(1)
 	if after := h.State(); !reflect.DeepEqual(before, after) || len(h.f.log()) != 1 {
