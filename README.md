@@ -16,7 +16,7 @@ library they share.
 
 | Package | Purpose |
 |---------|---------|
-| `pkg/protocol` | Wire contract (`/enroll`, `/heartbeat`, `/deregister`, `/tenants`) — the single source of truth shared with the server |
+| `pkg/protocol` | Wire contract (`/enroll`, `/heartbeat`, `/deregister`, `/tenants`, and the public discovery document `/.well-known/claimward-configuration`) — the single source of truth shared with the server |
 | `pkg/auth` | Interactive sign-in behind a pluggable `Provider`: **GitHub** device-authorization flow (default), **OIDC** Authorization Code + PKCE, or **go-authn** device flow, whose provider also registers the device's WireGuard key (`KeyRegistrar`). Returns the bearer `Token` sent to the server |
 | `pkg/oidc` | The OIDC Authorization Code + PKCE flow (issuer discovery, loopback redirect capture) used by the `oidc` auth provider |
 | `pkg/browser` | Opens a URL in the user's default browser using absolute opener paths, so it works from GUI apps launched by LaunchServices |
