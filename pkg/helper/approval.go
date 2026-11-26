@@ -216,13 +216,12 @@ func (a *approvals) saveLocked(f approvalsFile) error {
 	_ = os.MkdirAll(filepath.Dir(a.path), 0o755)
 	b, _ := json.MarshalIndent(f, "", "  ") // plain strings and times: cannot fail
 	tmp := a.path + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
-		os.Remove(tmp)
-		return err
+	err := os.WriteFile(tmp, append(b, '\n'), 0o600)
+	if err == nil {
+		err = os.Rename(tmp, a.path)
 	}
-	if err := os.Rename(tmp, a.path); err != nil {
+	if err != nil {
 		os.Remove(tmp)
-		return err
 	}
-	return nil
+	return err
 }
