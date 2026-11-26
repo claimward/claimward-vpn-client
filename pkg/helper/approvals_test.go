@@ -248,3 +248,28 @@ func TestAnApprovalsPathThatIsADirectoryIsAnError(t *testing.T) {
 		t.Error("a directory was read as an approvals file")
 	}
 }
+
+func TestSaveFailuresAreReported(t *testing.T) {
+	dir := t.TempDir()
+	// Temp file cannot be created: a parent that is a regular file.
+	file := filepath.Join(dir, "f")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &approvals{path: filepath.Join(file, "approved.json")}
+	if err := a.saveLocked(approvalsFile{Version: 1}); err == nil {
+		t.Error("write under a regular file succeeded")
+	}
+	// Rename cannot replace a non-empty directory.
+	d := filepath.Join(dir, "d")
+	if err := os.MkdirAll(filepath.Join(d, "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b := &approvals{path: d}
+	if err := b.saveLocked(approvalsFile{Version: 1}); err == nil {
+		t.Error("rename over a directory succeeded")
+	}
+	if _, err := os.Stat(d + ".tmp"); err == nil {
+		t.Error("temp file left behind")
+	}
+}
