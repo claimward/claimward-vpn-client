@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("<svg xmlns=\"http://www.w3.org/2000/svg\"><style>@\\69mport \"x\";</style><rect style=\"fill:ur\\6c(http://e)\"/></svg>")

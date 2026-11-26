@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("<!DOCTYPE svg [<!ENTITY a \"x\"><!ENTITY b \"&a;&a;&a;&a;\">]><svg xmlns=\"http://www.w3.org/2000/svg\"><text>&b;</text></svg>")

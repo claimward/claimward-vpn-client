@@ -21,11 +21,36 @@ const (
 	PathWellKnownConfiguration = "/.well-known/claimward-configuration"
 )
 
+// HeaderProvider names, on every authenticated request, the identity provider
+// that issued the bearer token: its Provider.ID from the discovery document.
+// The server verifies the token with that provider only. gRPC carries it in
+// the metadata key MetadataProvider.
+const (
+	HeaderProvider   = "Claimward-Provider"
+	MetadataProvider = "claimward-provider" // gRPC metadata keys are lower case
+)
+
+// Error codes of a 401 that concerns the provider (ErrorResponse.Error).
+const (
+	ErrMissingProvider = "missing_provider"
+	ErrUnknownProvider = "unknown_provider"
+)
+
+// Provider kinds.
+const (
+	KindGitHub  = "github"
+	KindOIDC    = "oidc"
+	KindGoAuthn = "go-authn"
+)
+
 // ConfigurationVersion is the version of the discovery document's shape.
-const ConfigurationVersion = 1
+// Version 2 replaced the single provider by a list.
+const ConfigurationVersion = 2
 
 // Configuration is the public discovery document served, unauthenticated, at
 // PathWellKnownConfiguration. It holds public values only: never a secret.
+// The server decides which identity providers it accepts; a client needs only
+// the server's URL.
 //
 // Like RFC 8414 §3.2, a claim without a value is omitted, not sent empty.
 type Configuration struct {
@@ -33,19 +58,46 @@ type Configuration struct {
 	Version int `json:"version"`
 	// ServerName is the operator's display name for the server (optional).
 	ServerName string `json:"server_name,omitempty"`
-	// Provider is the sign-in provider: "github", "oidc" or "go-authn".
-	Provider string `json:"provider"`
-	// GitHubClientID is the public client ID of the server's GitHub OAuth app
-	// (provider "github").
-	GitHubClientID string `json:"github_client_id,omitempty"`
-	// OIDCIssuer and OIDCClientID identify the OIDC provider (providers "oidc"
-	// and "go-authn").
-	OIDCIssuer   string `json:"oidc_issuer,omitempty"`
-	OIDCClientID string `json:"oidc_client_id,omitempty"`
+	// Providers are the identity providers the server accepts, in the order the
+	// operator listed them; the person picks one to sign in with.
+	Providers []Provider `json:"providers"`
 	// Exclusive: this server refuses to share the machine with other Claimward
 	// tunnels. Clients refuse to connect it alongside others, and refuse others
 	// while it is connected.
 	Exclusive bool `json:"exclusive"`
+	// Logo is the server's logo, present only when the operator configured one.
+	Logo *Logo `json:"logo,omitempty"`
+}
+
+// PathWellKnownLogo is where the server's SVG logo is served.
+const PathWellKnownLogo = "/.well-known/claimward-logo.svg"
+
+// Logo says where the server's SVG logo is and what it must hash to. A client
+// fetches Path from the SAME origin as the discovery document (never another
+// host), checks the SHA-256, and validates the image with pkg/svgsafe before
+// showing it.
+type Logo struct {
+	// Path is a path on the server, PathWellKnownLogo.
+	Path string `json:"path"`
+	// SHA256 is the lower-case hex SHA-256 of the SVG's bytes.
+	SHA256 string `json:"sha256"`
+}
+
+// Provider is one identity provider a server accepts.
+type Provider struct {
+	// ID is stable and url-safe; it is what HeaderProvider carries.
+	ID string `json:"id"`
+	// Kind is KindGitHub, KindOIDC or KindGoAuthn.
+	Kind string `json:"kind"`
+	// Name is the display name to show on the sign-in choice, e.g. "GitHub".
+	Name string `json:"name"`
+	// GitHubClientID is the public client ID of the server's GitHub OAuth app
+	// (kind "github").
+	GitHubClientID string `json:"github_client_id,omitempty"`
+	// OIDCIssuer and OIDCClientID identify the OIDC provider (kinds "oidc" and
+	// "go-authn").
+	OIDCIssuer   string `json:"oidc_issuer,omitempty"`
+	OIDCClientID string `json:"oidc_client_id,omitempty"`
 }
 
 // TenantInfo identifies a tenant the authenticated user may connect to.
