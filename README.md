@@ -239,16 +239,40 @@ A person may belong to several tenants and chooses one per session.
 
 `pkg/appcore` reads `config.json` under `os.UserConfigDir()/Claimward/`
 (`~/Library/Application Support` on macOS, `~/.config` on Linux, `%AppData%`
-on Windows), then these environment overrides:
+on Windows). From **v0.10.0** the client is multi-server: the person types
+only a server URL, and everything else (name, sign-in providers, exclusivity,
+logo) is read at run time from the server's
+`/.well-known/claimward-configuration` (https only, size-capped, cached for its
+`max-age`; an unknown version is refused). The file is
 
-| Key | Environment | Notes |
-|---|---|---|
-| `server_url` | `CLAIMWARD_SERVER` | required; `https://` only (`http://` is accepted for a loopback address, for development); must also be listed in the helper's `servers`, which follow the same rule |
-| `provider` | `CLAIMWARD_AUTH_PROVIDER` | `github` (default), `oidc` or `go-authn` |
-| `github_client_id` | `CLAIMWARD_GITHUB_CLIENT_ID` | required for `github` |
-| `oidc_issuer` | `CLAIMWARD_OIDC_ISSUER` | required for `oidc` and `go-authn` |
-| `oidc_client_id` | `CLAIMWARD_OIDC_CLIENT_ID` | required for `oidc` and `go-authn` |
-| `socket_path` | `CLAIMWARD_HELPER_SOCKET` | default `/var/run/claimward-helper.sock`, `C:\ProgramData\Claimward\helper.sock` on Windows |
+```json
+{
+  "version": 2,
+  "servers": [
+    {"url": "https://vpn.example.org", "provider": "uni"},
+    {"url": "https://lab.example.org"}
+  ],
+  "socket_path": "/var/run/claimward-helper.sock"
+}
+```
+
+| Key | Notes |
+|---|---|
+| `version` | `2`. A v0.9 file (`server_url`, `provider`, `github_client_id`, `oidc_*`) is migrated once on first load, and its session is adopted by the matching server |
+| `servers[].url` | `https://` only (`http://` is accepted for a loopback address, for development); must also be listed in the helper's `servers`, which follow the same rule |
+| `servers[].provider` | optional: the provider id chosen from the server's document; asked for when the server offers several |
+| `socket_path` | optional; default `/var/run/claimward-helper.sock`, `C:\ProgramData\Claimward\helper.sock` on Windows. Override: `CLAIMWARD_HELPER_SOCKET` |
+
+`CLAIMWARD_HELPER_SOCKET` is the only environment override; the v0.9 variables
+(`CLAIMWARD_SERVER`, `CLAIMWARD_AUTH_PROVIDER`, `CLAIMWARD_GITHUB_CLIENT_ID`,
+`CLAIMWARD_OIDC_*`) are gone.
+
+Several servers may be connected at once (one tunnel each on macOS; Linux and
+Windows hold one tunnel for now). A server that announces `exclusive` is refused
+while any other is connected, and any other is refused while an exclusive one
+is: `appcore` and the helper both return `*exclusive.Error`, which names the
+blocking server. Sessions are stored per server (canonical URL + provider id),
+and requests carry `Claimward-Provider`.
 
 The helper's own `helper.json` takes `servers` (required), `group` (default
 `admin` on macOS, `claimward` on Linux, `Claimward Users` on Windows) and
