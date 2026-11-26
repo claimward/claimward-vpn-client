@@ -65,6 +65,22 @@ type Configuration struct {
 	// tunnels. Clients refuse to connect it alongside others, and refuse others
 	// while it is connected.
 	Exclusive bool `json:"exclusive"`
+	// Logo is the server's logo, present only when the operator configured one.
+	Logo *Logo `json:"logo,omitempty"`
+}
+
+// PathWellKnownLogo is where the server's SVG logo is served.
+const PathWellKnownLogo = "/.well-known/claimward-logo.svg"
+
+// Logo says where the server's SVG logo is and what it must hash to. A client
+// fetches Path from the SAME origin as the discovery document (never another
+// host), checks the SHA-256, and validates the image with pkg/svgsafe before
+// showing it.
+type Logo struct {
+	// Path is a path on the server, PathWellKnownLogo.
+	Path string `json:"path"`
+	// SHA256 is the lower-case hex SHA-256 of the SVG's bytes.
+	SHA256 string `json:"sha256"`
 }
 
 // Provider is one identity provider a server accepts.
