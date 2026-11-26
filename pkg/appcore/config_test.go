@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -88,8 +89,13 @@ func TestTheConfigurationRoundTripsAndTheSocketComesFromTheEnvironment(t *testin
 	if err := SaveConfig(in); err != nil {
 		t.Fatal(err)
 	}
-	if st, err := os.Stat(ConfigPath()); err != nil || st.Mode().Perm() != 0o600 {
-		t.Fatalf("%v %v", st, err)
+	st, err := os.Stat(ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Windows reports 0666 whatever was asked; ACLs hold the privacy there.
+	if runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", st.Mode())
 	}
 	t.Setenv("CLAIMWARD_HELPER_SOCKET", "/run/real.sock")
 	out, err := LoadConfig()
