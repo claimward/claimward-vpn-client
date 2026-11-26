@@ -76,7 +76,16 @@ func (f *fakeTunnel) Close() error {
 // in a temporary directory, with tunnels and route watches faked.
 func helperFor(t *testing.T, servers ...string) (*helperclient.Client, *Server, *[]wgtun.Config) {
 	t.Helper()
-	s := New(Config{Servers: servers}, "linux", "app-test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	dir, err := os.MkdirTemp("", "cwh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	s := New(Config{Servers: servers, Approvals: filepath.Join(dir, "approved.json")}, "linux", "app-test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// A test stands in for root and for the system: the approvals file is
+	// ours, and no consent is given unless the test says so.
+	s.approvals.verify = nil
+	s.UseAuthorizer(AuthorizerFunc(func(context.Context, Approval) error { return ErrDenied }))
 	var ups []wgtun.Config
 	s.up = func(c wgtun.Config) (Tunnel, error) { ups = append(ups, c); return &fakeTunnel{}, nil }
 	s.watch = func(ctx context.Context, ep, bearer, provider, pub string, on func(routeclient.Update)) error {
@@ -87,11 +96,6 @@ func helperFor(t *testing.T, servers ...string) (*helperclient.Client, *Server, 
 	s.UseDiscovery(func(ctx context.Context, server string) (*protocol.Configuration, error) {
 		return &protocol.Configuration{Version: 2, ServerName: "Test"}, nil
 	})
-	dir, err := os.MkdirTemp("", "cwh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "h.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
@@ -151,7 +155,7 @@ func TestTheHelperConnectsToItsServer(t *testing.T) {
 func TestTheHelperRefusesWhatItWasNotConfiguredFor(t *testing.T) {
 	trusted, rogue := newVPNServer(t), newVPNServer(t)
 	c, _, ups := helperFor(t, trusted.URL)
-	if _, err := c.Connect(hproto.ConnectSpec{ServerURL: rogue.URL, Bearer: "tok", PrivateKey: key(t)}); err == nil || !strings.Contains(err.Error(), "not one this helper is configured for") {
+	if _, err := c.Connect(hproto.ConnectSpec{ServerURL: rogue.URL, Bearer: "tok", PrivateKey: key(t)}); err == nil || !strings.Contains(err.Error(), "is not approved") {
 		t.Errorf("a rogue server: %v", err)
 	}
 	if _, err := c.Tenants(rogue.URL, "", "tok"); err == nil {

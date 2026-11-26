@@ -14,7 +14,7 @@ import (
 func TestHelperRefusesAnOversizedRequest(t *testing.T) {
 	s := New(Config{Servers: []string{"https://vpn.example.org"}}, "test", "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	srv, cli := net.Pipe()
-	go s.handle(srv)
+	go s.handle(srv, false)
 	go func() {
 		// A well-formed request, but larger than maxRequestBytes.
 		_, _ = io.WriteString(cli, `{"action":"status","pad":"`+strings.Repeat("a", 2*maxRequestBytes)+`"}`)

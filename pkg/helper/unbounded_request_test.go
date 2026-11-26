@@ -19,7 +19,7 @@ func TestHelperBoundsTheRequestItReads(t *testing.T) {
 	s := New(Config{Servers: []string{"https://vpn.example.org"}}, "test", "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	srv, cli := net.Pipe()
 	done := make(chan struct{})
-	go func() { s.handle(srv); close(done) }()
+	go func() { s.handle(srv, false); close(done) }()
 	go func() { _, _ = io.Copy(io.Discard, cli) }() // the reply, if it comes
 
 	chunk := bytes.Repeat([]byte("a"), 64<<10)

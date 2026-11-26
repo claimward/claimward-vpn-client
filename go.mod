@@ -4,6 +4,7 @@ go 1.27.4
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
+	github.com/godbus/dbus/v5 v5.2.4
 	golang.org/x/oauth2 v0.38.0
 	golang.org/x/sys v0.50.0
 	golang.zx2c4.com/wireguard v0.0.0-20261024220952-b3bc704ef0ee

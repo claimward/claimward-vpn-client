@@ -38,6 +38,25 @@ func Listen(path, group string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
+	return listen(path, sid, socketSDDL(sid))
+}
+
+// ListenElevated opens the second socket, the one ActionApprove's consent
+// comes through: its DACL names SYSTEM and the Administrators alone, so only a
+// process whose token carries the Administrators group ENABLED -- an elevated
+// one, after the UAC prompt -- may connect. A standard user, and an
+// administrator running unelevated (whose Administrators SID is deny-only),
+// are refused by the kernel before a byte is read. Pass the same group as
+// Listen: the directory is shared.
+func ListenElevated(path, group string) (net.Listener, error) {
+	sid, err := socketGroup(group)
+	if err != nil {
+		return nil, err
+	}
+	return listen(path, sid, elevatedSocketSDDL())
+}
+
+func listen(path, sid, sockSDDL string) (net.Listener, error) {
 	dir := filepath.Dir(path)
 	if err := createSecured(dir, dirSDDL(sid)); err != nil {
 		return nil, err
@@ -59,7 +78,7 @@ func Listen(path, group string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := applySDDL(path, socketSDDL(sid)); err != nil {
+	if err := applySDDL(path, sockSDDL); err != nil {
 		ln.Close()
 		return nil, fmt.Errorf("secure %s: %w", path, err)
 	}
