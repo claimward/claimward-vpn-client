@@ -211,37 +211,21 @@ func (a *approvals) remove(server string) (bool, error) {
 
 // saveLocked writes the file whole beside itself and renames it over: a crash
 // leaves the old file or the new one. It is created 0600 in the directory of
-// the file (root's on Unix; on Windows the protected directory of the socket,
-// whose ACL the new file inherits).
+// the file (root's on Unix, 0600; on Windows the protected directory of the
+// socket, whose ACL the new file inherits).
 func (a *approvals) saveLocked(f approvalsFile) error {
 	dir := filepath.Dir(a.path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return err
-	}
+	b, _ := json.MarshalIndent(f, "", "  ") // plain strings and times: cannot fail
 	tmp, err := os.CreateTemp(dir, ".approved-*")
 	if err != nil {
 		return err
 	}
 	name := tmp.Name()
-	if _, err := tmp.Write(append(b, '\n')); err != nil {
-		tmp.Close()
-		os.Remove(name)
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(name)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(name)
-		return err
-	}
-	if err := os.Chmod(name, 0o644); err != nil && !errors.Is(err, os.ErrInvalid) {
+	_, werr := tmp.Write(append(b, '\n'))
+	if err := errors.Join(werr, tmp.Sync(), tmp.Close()); err != nil {
 		os.Remove(name)
 		return err
 	}

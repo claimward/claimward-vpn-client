@@ -263,6 +263,13 @@ const (
 
 func (s *Server) handle(conn net.Conn, elevated bool) {
 	defer conn.Close()
+	// A bug in answering one request must not take the other tunnels of the
+	// machine down with the helper: the request is dropped, loudly.
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("request handler panicked", "panic", r)
+		}
+	}()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
 	var req hproto.Request
 	if err := json.NewDecoder(io.LimitReader(conn, maxRequestBytes)).Decode(&req); err != nil {
