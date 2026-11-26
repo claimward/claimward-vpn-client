@@ -18,6 +18,18 @@ func TestTwoPlainServersMayShare(t *testing.T) {
 	}
 }
 
+// The text of the refusing party, the helper's, wins over the built one.
+func TestAGivenReasonReplacesTheBuiltText(t *testing.T) {
+	e := &Error{Server: plainA, Blocker: solo, Reason: "the helper says no"}
+	if e.Error() != "the helper says no" {
+		t.Fatalf("%q", e.Error())
+	}
+	e.Reason = ""
+	if e.Error() == "" || e.Error() == "the helper says no" {
+		t.Fatalf("%q", e.Error())
+	}
+}
+
 func TestNothingConnectedAlwaysAllowed(t *testing.T) {
 	if err := Check(solo, nil); err != nil {
 		t.Fatal(err)

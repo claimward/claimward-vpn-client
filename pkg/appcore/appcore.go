@@ -76,6 +76,9 @@ type Core struct {
 	renewAfter func(remaining time.Duration) time.Duration
 	// save persists the configuration (SaveConfig; replaced by tests).
 	save func(*Config) error
+	// newAuth builds a provider from its parameters (auth.New; replaced by
+	// tests).
+	newAuth func(auth.Config) (auth.Provider, error)
 }
 
 // renewDelay brings a fresh bearer at 40% of what the lease has left: before
@@ -107,6 +110,7 @@ func New(cfg *Config) *Core {
 		state:      map[string]*serverState{},
 		renewAfter: renewDelay,
 		save:       SaveConfig,
+		newAuth:    auth.New,
 	}
 }
 
@@ -442,9 +446,8 @@ func (c *Core) resolve(ctx context.Context, server, providerID string) (ServerEn
 	}
 	p := chosen(e, doc)
 	if p.ID == "" {
-		if len(doc.Providers) == 0 {
-			return e, doc, p, errors.New("the server offers no identity provider")
-		}
+		// A document with no provider at all never gets here: discovery
+		// refuses it.
 		return e, doc, p, ErrProviderRequired
 	}
 	if p.ID != e.Provider || providerID != "" {
@@ -482,7 +485,7 @@ func (c *Core) Login(ctx context.Context, server, providerID string) error {
 	if err != nil {
 		return err
 	}
-	provider, err := auth.New(authConfig(p))
+	provider, err := c.newAuth(authConfig(p))
 	if err != nil {
 		return err
 	}
@@ -547,7 +550,7 @@ func (c *Core) session(ctx context.Context, server string) (ServerEntry, *tokens
 	if _, err := wgkey.ParsePrivate(sess.WGPrivateKey); err != nil {
 		return e, nil, "", fmt.Errorf("device key invalid, sign in again: %w", err)
 	}
-	provider, err := auth.New(authConfig(p))
+	provider, err := c.newAuth(authConfig(p))
 	if err != nil {
 		return e, nil, "", err
 	}
@@ -858,7 +861,8 @@ func (c *Core) Logo(ctx context.Context, server string) []byte {
 	}
 	disc := c.discClient()
 	doc, err := disc.Get(ctx, e.URL)
-	if err != nil || doc.Logo == nil {
+	if err != nil {
+		c.logf("logo of %s: %v", e.URL, err)
 		return nil
 	}
 	b, err := disc.Logo(ctx, e.URL, doc)

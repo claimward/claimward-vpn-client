@@ -3,12 +3,14 @@ package helper
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/claimward/claimward-vpn-client/pkg/hproto"
 	"github.com/claimward/claimward-vpn-client/pkg/protocol"
 	"github.com/claimward/claimward-vpn-client/pkg/routeclient"
+	"github.com/claimward/claimward-vpn-client/pkg/secureurl"
 )
 
 func isUp(s *Server) bool { return len(s.status().Tunnels) > 0 }
@@ -214,7 +216,88 @@ func TestAnInvalidProviderIdIsRefused(t *testing.T) {
 	v := newVPNServer(t)
 	_, s, ups := helperFor(t, v.URL)
 	spec := &hproto.ConnectSpec{ServerURL: v.URL, Provider: "a b\r\nX: y", Bearer: "tok", PrivateKey: key(t)}
-	if r := s.connect(spec); r.OK || len(*ups) != 0 {
+	if r := s.connect(spec); r.OK || len(*ups) != 0 || r.Error != "invalid provider id" {
 		t.Fatalf("%+v", r)
+	}
+}
+
+// A server URL that is no safe one is refused for what it is, not as a server
+// the helper merely does not know.
+func TestAnUnsafeServerURLIsRefusedAsSuch(t *testing.T) {
+	v := newVPNServer(t)
+	_, s, ups := helperFor(t, v.URL)
+	spec := &hproto.ConnectSpec{ServerURL: "http://vpn.example.org", Bearer: "tok", PrivateKey: key(t)}
+	if r := s.connect(spec); r.OK || len(*ups) != 0 || !strings.Contains(r.Error, "must be https") {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// An answerless resolver is no document: the helper still fails closed.
+func TestAResolverThatAnswersNothingFailsClosed(t *testing.T) {
+	v := newLeaseServer(t)
+	s, tuns := leasedHelper(t, v.URL)
+	s.UseDiscovery(func(context.Context, string) (*protocol.Configuration, error) { return nil, nil })
+	spec, _ := connectSpec(t, v.URL)
+	if r := s.connect(spec); r.OK || r.ErrorCode != hproto.ErrDiscovery || len(tuns()) != 0 {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestABadServerURLIsRefusedByRenewAndDown(t *testing.T) {
+	v := newLeaseServer(t)
+	s, _ := leasedHelper(t, v.URL)
+	spec, _ := connectSpec(t, v.URL)
+	if r := s.connect(spec); !r.OK {
+		t.Fatal(r.Error)
+	}
+	if r := s.renewNow(&hproto.ConnectSpec{ServerURL: "::not a url", Bearer: "x"}); r.OK || !strings.HasPrefix(r.Error, "server: ") {
+		t.Errorf("renew: %+v", r)
+	}
+	if r := s.down(&hproto.ConnectSpec{ServerURL: "::not a url"}); r.OK || !strings.HasPrefix(r.Error, "server: ") || isUp(s) == false {
+		t.Errorf("down: %+v", r)
+	}
+}
+
+// A session that is no longer its server's live one cannot take the live
+// tunnel down.
+func TestAStaleSessionDoesNotDropTheLiveTunnel(t *testing.T) {
+	v := newLeaseServer(t)
+	s, _ := leasedHelper(t, v.URL)
+	spec, _ := connectSpec(t, v.URL)
+	if r := s.connect(spec); !r.OK {
+		t.Fatal(r.Error)
+	}
+	server, _ := secureurl.Canonical(v.URL)
+	s.drop(&session{server: server}, "a stale renewal gave up")
+	if st := s.status(); len(st.Tunnels) != 1 || len(st.LastErrors) != 0 {
+		t.Fatalf("%+v", st)
+	}
+}
+
+// ⛔ The check made before the enrollment can be outrun by another connection
+// made while the server answers: the one made after it refuses, gives the
+// enrollment back, and brings nothing up.
+func TestAConnectionMadeMeanwhileIsNotOutrunByAnExclusiveOne(t *testing.T) {
+	plainSrv, soloSrv := newLeaseServer(t), newLeaseServer(t)
+	s, tuns := leasedHelper(t, plainSrv.URL, soloSrv.URL)
+	describe(s, map[string]*protocol.Configuration{plainSrv.URL: plain("Campus"), soloSrv.URL: solo("Lab")})
+	soloSrv.set(func(v *leaseServer) {
+		v.onEnroll = func() {
+			spec, _ := connectSpec(t, plainSrv.URL)
+			if r := s.connect(spec); !r.OK {
+				t.Error(r.Error)
+			}
+		}
+	})
+	spec, _ := connectSpec(t, soloSrv.URL)
+	r := s.connect(spec)
+	if r.OK || r.ErrorCode != hproto.ErrExclusive || r.BlockedBy != "Campus" {
+		t.Fatalf("%+v", r)
+	}
+	if len(tuns()) != 1 || len(s.status().Tunnels) != 1 {
+		t.Errorf("tunnels %d", len(tuns()))
+	}
+	if n := soloSrv.count(func(v *leaseServer) int { return len(v.deregisters) }); n != 1 {
+		t.Errorf("the enrollment was not given back (%d)", n)
 	}
 }

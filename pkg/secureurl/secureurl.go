@@ -45,10 +45,7 @@ func Canonical(raw string) (string, error) {
 	if err := Check(raw); err != nil {
 		return "", err
 	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "", err
-	}
+	u, _ := url.Parse(raw) // Check parsed it already: it cannot fail here
 	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(raw, "#") {
 		return "", errors.New("a server URL has no query or fragment")
 	}

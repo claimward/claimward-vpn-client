@@ -36,6 +36,9 @@ type leaseServer struct {
 	forget bool
 	// failEnroll refuses enrollments.
 	failEnroll bool
+	// onEnroll, when set, runs while an enrollment is being answered, as
+	// something else happens at the helper meanwhile.
+	onEnroll func()
 }
 
 func newLeaseServer(t *testing.T) *leaseServer {
@@ -47,11 +50,14 @@ func newLeaseServer(t *testing.T) *leaseServer {
 		var req protocol.EnrollRequest
 		json.NewDecoder(r.Body).Decode(&req)
 		v.mu.Lock()
-		fail := v.failEnroll
+		fail, hook := v.failEnroll, v.onEnroll
 		if !fail {
 			v.enrolled = append(v.enrolled, req.PublicKey)
 		}
 		v.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
 		if fail {
 			w.WriteHeader(http.StatusUnauthorized)
 			json.NewEncoder(w).Encode(protocol.ErrorResponse{Error: "invalid_token", Message: "expired"})

@@ -798,7 +798,10 @@ func TestRefusedCommandsDoNothing(t *testing.T) {
 	h.f.gate = make(chan struct{})
 	h.Apply(signedOut)
 	h.SignIn()
-	for len(h.f.log()) == 0 { // Login is under way, waiting for the gate
+	for deadline := time.Now().Add(5 * time.Second); len(h.f.log()) == 0; { // Login is under way, waiting for the gate
+		if time.Now().After(deadline) {
+			t.Fatal("the sign-in never started")
+		}
 		time.Sleep(time.Millisecond)
 	}
 	before := h.State()

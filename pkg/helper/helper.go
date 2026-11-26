@@ -338,6 +338,12 @@ func (s *Server) enroll(spec *hproto.ConnectSpec, gen uint64, member *exclusive.
 
 	if member == nil {
 		cfg, err := s.discover(ctx, server)
+		if cfg == nil { // a resolver that answered nothing is no answer
+			cfg = &protocol.Configuration{}
+			if err == nil {
+				err = errors.New("empty answer")
+			}
+		}
 		if err != nil {
 			// Fail closed: without the document the helper cannot tell whether
 			// the server is exclusive.

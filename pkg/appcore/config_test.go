@@ -269,3 +269,58 @@ func TestAMigratedSessionMovesToTheProvidersId(t *testing.T) {
 		t.Errorf("entry %q", got)
 	}
 }
+
+func TestAConfigThatIsNotJSONIsAnError(t *testing.T) {
+	confHome(t)
+	writeConf(t, "not json")
+	if c, err := LoadConfig(); err == nil {
+		t.Fatalf("LoadConfig = %+v, nil", c)
+	}
+}
+
+func TestAConfigWhoseServersAreMisTypedIsAnError(t *testing.T) {
+	confHome(t)
+	writeConf(t, `{"version":2,"servers":"https://a.example.org"}`)
+	if c, err := LoadConfig(); err == nil {
+		t.Fatalf("LoadConfig = %+v, nil", c)
+	}
+}
+
+func TestAMigrationThatCannotAdoptTheSessionIsRetried(t *testing.T) {
+	confHome(t)
+	restore := tokenstore.UseMemory()
+	defer restore()
+	old := `{"server_url":"https://a.example.org","provider":"github"}`
+	writeConf(t, old)
+	seedLegacy(t, tokenstore.Session{Bearer: "b"})
+	// Corrupt the old session so the store cannot hand it over.
+	p, err := tokenstore.Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Servers) != 1 {
+		t.Fatalf("servers = %+v", c.Servers)
+	}
+	data, err := os.ReadFile(ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != old {
+		t.Fatalf("the old file was rewritten before its session was adopted: %s", data)
+	}
+}
+
+func TestValidateNamesTheServerItRefuses(t *testing.T) {
+	c := Config{Servers: []ServerEntry{{URL: "http://vpn.example.org"}}}
+	err := c.Validate()
+	if err == nil || strings.Contains(err.Error(), "not canonical") {
+		t.Fatalf("Validate = %v, want the URL's own refusal", err)
+	}
+}

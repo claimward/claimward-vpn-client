@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -333,6 +334,10 @@ func TestExclusivityIsRefusedInBothDirections(t *testing.T) {
 			if only(t, c, second.URL).Connected {
 				t.Error("the refused server is connected")
 			}
+			// The app refused it itself: the helper was never asked.
+			if l := logOf(c); strings.Contains(l, "enrolling at "+second.URL) || !strings.Contains(l, "connect refused") {
+				t.Errorf("the app's own check did not refuse it:\n%s", l)
+			}
 			// Once the first is down, the second is welcome.
 			if err := c.Disconnect(ctx, first.URL); err != nil {
 				t.Fatal(err)
@@ -368,5 +373,8 @@ func TestTheHelperRefusesWhatTheAppDidNotKnow(t *testing.T) {
 	var xerr *exclusive.Error
 	if !errors.As(err, &xerr) || xerr.BlockedBy() != "Campus" {
 		t.Fatalf("the helper's refusal: %v", err)
+	}
+	if l := logOf(c); !strings.Contains(l, "enrolling at "+b.URL) || !strings.Contains(l, "connect refused") || strings.Contains(l, "connect FAILED") {
+		t.Errorf("the helper's refusal is not reported as one:\n%s", l)
 	}
 }

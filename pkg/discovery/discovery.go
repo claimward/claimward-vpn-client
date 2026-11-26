@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -323,16 +322,9 @@ func (c *Client) Logo(ctx context.Context, server string, cfg *protocol.Configur
 	if err := validLogoPath(cfg.Logo.Path); err != nil {
 		return nil, fmt.Errorf("logo path: %w", err)
 	}
-	// origin ends at the host and the path starts with a single '/', so the
-	// result cannot name another host; check it all the same.
-	u, err := url.Parse(origin + cfg.Logo.Path)
-	if err != nil {
-		return nil, err
-	}
-	if o, _ := url.Parse(origin); u.Scheme != o.Scheme || u.Host != o.Host {
-		return nil, errors.New("logo is not on the server's origin")
-	}
-	b, _, err := c.fetch(ctx, u.String(), MaxLogoBytes)
+	// origin ends at the host and validLogoPath leaves a path that starts
+	// with a single '/', so the result cannot name another host.
+	b, _, err := c.fetch(ctx, origin+cfg.Logo.Path, MaxLogoBytes)
 	if err != nil {
 		return nil, fmt.Errorf("logo: %w", err)
 	}

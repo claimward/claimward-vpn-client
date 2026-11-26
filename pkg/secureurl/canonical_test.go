@@ -46,3 +46,18 @@ func TestOrigin(t *testing.T) {
 		t.Errorf("Origin = %q, %v", got, err)
 	}
 }
+
+// A URL that parses but names no host has no origin.
+func TestOriginNeedsAHost(t *testing.T) {
+	for _, bad := range []string{"", "/relative/path", "https:///nohost"} {
+		if got, err := Origin(bad); err == nil {
+			t.Errorf("Origin(%q) = %q, want a refusal", bad, got)
+		}
+	}
+}
+
+func TestOriginRefusesWhatDoesNotParse(t *testing.T) {
+	if got, err := Origin("%zz"); err == nil {
+		t.Errorf("Origin = %q, want a refusal", got)
+	}
+}
