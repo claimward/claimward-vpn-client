@@ -23,6 +23,17 @@ import (
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
+	// Provider is the id of the identity provider that issued the bearer; it
+	// travels in protocol.HeaderProvider on every authenticated request. A
+	// server that lists several providers refuses a request without it.
+	Provider string
+}
+
+// WithProvider returns c naming provider (a protocol.Provider.ID) on its
+// requests.
+func (c *Client) WithProvider(provider string) *Client {
+	c.Provider = provider
+	return c
 }
 
 // New returns a Client for the given server base URL (e.g. https://vpn.acme.com).
@@ -125,6 +136,9 @@ func (c *Client) do(ctx context.Context, method, path, bearer string, body, out 
 	}
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
+		if c.Provider != "" {
+			req.Header.Set(protocol.HeaderProvider, c.Provider)
+		}
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {

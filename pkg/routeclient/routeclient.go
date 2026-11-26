@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/claimward/claimward-vpn-client/pkg/protocol"
 	"github.com/claimward/claimward-vpn-client/pkg/routespb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -33,7 +34,10 @@ type Update struct {
 // route watch sent the person's token in the clear. Against a server that
 // does not speak TLS the handshake fails before any metadata is sent; the
 // tunnel stays up, without live route updates.
-func Watch(ctx context.Context, endpoint, bearer, publicKey string, onUpdate func(Update)) error {
+//
+// provider is the id of the identity provider that issued the bearer
+// (protocol.MetadataProvider); the server judges the token by it alone.
+func Watch(ctx context.Context, endpoint, bearer, provider, publicKey string, onUpdate func(Update)) error {
 	creds, err := transport(endpoint)
 	if err != nil {
 		return err
@@ -45,6 +49,9 @@ func Watch(ctx context.Context, endpoint, bearer, publicKey string, onUpdate fun
 	defer conn.Close()
 
 	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+bearer)
+	if provider != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, protocol.MetadataProvider, provider)
+	}
 	stream, err := routespb.NewRouteServiceClient(conn).Watch(ctx, &routespb.WatchRequest{PublicKey: publicKey})
 	if err != nil {
 		return fmt.Errorf("watch routes: %w", err)

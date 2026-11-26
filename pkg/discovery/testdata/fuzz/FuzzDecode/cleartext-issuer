@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"version\":2,\"providers\":[{\"id\":\"a\",\"kind\":\"oidc\",\"name\":\"G\",\"oidc_issuer\":\"http://idp.example.org\",\"oidc_client_id\":\"c\"}]}")
