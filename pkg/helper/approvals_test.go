@@ -116,7 +116,7 @@ func TestAnApprovalsFileThatCannotBeReadFailsClosed(t *testing.T) {
 	}
 	// A file that exists but cannot be opened.
 	a.verify = nil
-	if os.Getuid() != 0 {
+	if os.Getuid() > 0 { // not root, and not Windows (-1), where modes do not bar a read
 		if err := os.WriteFile(a.path, []byte(`{}`), 0o000); err != nil {
 			t.Fatal(err)
 		}
@@ -143,11 +143,11 @@ func TestAnApprovalsFileThatCannotBeWritten(t *testing.T) {
 	if err := a.add(approvedEntry{URL: "https://x"}); err == nil {
 		t.Error("add over a directory")
 	}
-	if left, _ := filepath.Glob(filepath.Join(dir, ".approved-*")); len(left) != 0 {
-		t.Errorf("temporary files left behind: %v", left)
+	if _, err := os.Stat(target + ".tmp"); err == nil {
+		t.Error("temporary file left behind")
 	}
 	// The temporary file cannot be created: the directory is not writable.
-	if os.Getuid() != 0 {
+	if os.Getuid() > 0 {
 		ro := filepath.Join(dir, "ro")
 		os.Mkdir(ro, 0o500)
 		if err := (&approvals{path: filepath.Join(ro, "approved.json")}).add(approvedEntry{URL: "https://x"}); err == nil {
