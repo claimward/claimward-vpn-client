@@ -96,3 +96,11 @@ func TestUpWithoutPrivilegeFailsAtTheDevice(t *testing.T) {
 		t.Errorf("error: %v", err)
 	}
 }
+
+// A name that cannot be cleared stops createTUN before any device is made.
+func TestCreateTUNStopsAtAStuckName(t *testing.T) {
+	dev, err := createTUN("cw-x", 1380, func(string) error { return errors.New("busy") })
+	if err == nil || dev != nil || !strings.Contains(err.Error(), "stale interface cw-x") {
+		t.Errorf("stuck name: %v %v", dev, err)
+	}
+}

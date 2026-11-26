@@ -139,6 +139,18 @@ func freeName(name string, remove func(string) error) error {
 	return nil
 }
 
+// createTUN makes the device after clearing its name with remove.
+func createTUN(name string, mtu int, remove func(string) error) (tun.Device, error) {
+	if err := freeName(name, remove); err != nil {
+		return nil, err
+	}
+	dev, err := tun.CreateTUN(name, mtu)
+	if err != nil {
+		return nil, fmt.Errorf("create tun device (need root?): %w", err)
+	}
+	return dev, nil
+}
+
 // Up creates the interface, configures WireGuard, and applies addressing/routes.
 func Up(cfg Config) (*Tunnel, error) {
 	if _, err := renderUAPI(cfg); err != nil {
@@ -149,12 +161,9 @@ func Up(cfg Config) (*Tunnel, error) {
 	cfg.MTU = pathmtu.Fit(clampMTU(cfg.MTU), cfg.Endpoint)
 	mtu := cfg.MTU
 	ifName := InterfaceName(cfg.Name)
-	if err := freeName(ifName, removeStale); err != nil {
-		return nil, err
-	}
-	tunDev, err := tun.CreateTUN(ifName, mtu)
+	tunDev, err := createTUN(ifName, mtu, removeStale)
 	if err != nil {
-		return nil, fmt.Errorf("create tun device (need root?): %w", err)
+		return nil, err
 	}
 	name, err := tunDev.Name()
 	if err != nil {
