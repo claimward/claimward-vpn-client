@@ -95,7 +95,15 @@ func TestEachRefusalIsItsOwn(t *testing.T) {
 // byte, so more reads than bytes is a refusal. The bound is exact -- a document
 // whose tokens are all one byte long, then EOF, passes.
 func TestDecodeLoopIsBounded(t *testing.T) {
-	forever := func() (xml.Token, error) { return xml.Comment("x"), nil }
+	// "Endless" is 1000 comments then EOF, so that a missing bound fails this
+	// test (the walk would end without error) instead of hanging it.
+	n := 0
+	forever := func() (xml.Token, error) {
+		if n++; n > 1000 {
+			return nil, io.EOF
+		}
+		return xml.Comment("x"), nil
+	}
 	err := validate(forever, 3)
 	if err == nil || !strings.Contains(err.Error(), "no progress") {
 		t.Errorf("an endless decoder: %v", err)
