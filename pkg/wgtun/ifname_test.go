@@ -2,8 +2,12 @@ package wgtun
 
 import (
 	"errors"
+	"os"
+	"runtime"
 	"strings"
 	"testing"
+
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 func TestLinuxIfNameFitsAndIsDeterministic(t *testing.T) {
@@ -70,5 +74,25 @@ func TestFreeNameRefusesWhatCannotBeCleared(t *testing.T) {
 	err := freeName("cw-x", func(string) error { return errors.New("busy") })
 	if err == nil || !strings.Contains(err.Error(), "cw-x") || !strings.Contains(err.Error(), "busy") {
 		t.Errorf("stuck: %v", err)
+	}
+}
+
+// Without privilege the kernel refuses the device, and Up says so rather than
+// carrying on with none.
+func TestUpWithoutPrivilegeFailsAtTheDevice(t *testing.T) {
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("needs an unprivileged process")
+	}
+	priv, _ := wgtypes.GeneratePrivateKey()
+	peer, _ := wgtypes.GeneratePrivateKey()
+	tun, err := Up(Config{PrivateKey: priv, ServerPublicKey: peer.PublicKey(),
+		Endpoint: "192.0.2.1:51820", AllowedIPs: []string{"10.200.0.0/16"},
+		Address: "10.201.0.5/32", Name: "https://a.example.org"})
+	if err == nil {
+		tun.Close()
+		t.Fatal("a tunnel came up without privilege")
+	}
+	if !strings.Contains(err.Error(), "create tun device") {
+		t.Errorf("error: %v", err)
 	}
 }
