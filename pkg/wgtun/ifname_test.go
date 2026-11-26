@@ -1,6 +1,7 @@
 package wgtun
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -58,5 +59,16 @@ func TestWindowsAdapterName(t *testing.T) {
 func TestInterfaceNameIsPerPlatform(t *testing.T) {
 	if InterfaceName("https://a") == "" {
 		t.Error("empty name")
+	}
+}
+
+func TestFreeNameRefusesWhatCannotBeCleared(t *testing.T) {
+	var asked string
+	if err := freeName("cw-x", func(n string) error { asked = n; return nil }); err != nil || asked != "cw-x" {
+		t.Errorf("clear: %v %q", err, asked)
+	}
+	err := freeName("cw-x", func(string) error { return errors.New("busy") })
+	if err == nil || !strings.Contains(err.Error(), "cw-x") || !strings.Contains(err.Error(), "busy") {
+		t.Errorf("stuck: %v", err)
 	}
 }

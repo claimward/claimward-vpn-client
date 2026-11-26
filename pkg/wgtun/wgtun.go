@@ -130,6 +130,15 @@ func renderRoutes(pub wgtypes.Key, allowedIPs []string) (string, []string, error
 	return b.String(), ips, nil
 }
 
+// freeName clears the way for an interface of that name: a leftover that
+// cannot be removed is an error, not something to create over.
+func freeName(name string, remove func(string) error) error {
+	if err := remove(name); err != nil {
+		return fmt.Errorf("remove stale interface %s: %w", name, err)
+	}
+	return nil
+}
+
 // Up creates the interface, configures WireGuard, and applies addressing/routes.
 func Up(cfg Config) (*Tunnel, error) {
 	if _, err := renderUAPI(cfg); err != nil {
@@ -140,8 +149,8 @@ func Up(cfg Config) (*Tunnel, error) {
 	cfg.MTU = pathmtu.Fit(clampMTU(cfg.MTU), cfg.Endpoint)
 	mtu := cfg.MTU
 	ifName := InterfaceName(cfg.Name)
-	if err := removeStale(ifName); err != nil {
-		return nil, fmt.Errorf("remove stale interface %s: %w", ifName, err)
+	if err := freeName(ifName, removeStale); err != nil {
+		return nil, err
 	}
 	tunDev, err := tun.CreateTUN(ifName, mtu)
 	if err != nil {
