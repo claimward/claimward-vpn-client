@@ -33,6 +33,11 @@ type Config struct {
 	DNS             []string // optional
 	MTU             int      // 0 = default
 	Keepalive       int      // seconds, 0 = disabled
+	// Name is the key the interface is named after (the server's canonical
+	// URL): the same key always gets the same interface name, and two keys
+	// get two names, so tunnels to several servers can be up at once. See
+	// InterfaceName. Ignored on macOS, where the kernel numbers utunN.
+	Name string
 }
 
 // Tunnel is a running tunnel. Close it to tear everything down.
@@ -134,7 +139,11 @@ func Up(cfg Config) (*Tunnel, error) {
 	cfg.AllowedIPs = ips
 	cfg.MTU = pathmtu.Fit(clampMTU(cfg.MTU), cfg.Endpoint)
 	mtu := cfg.MTU
-	tunDev, err := tun.CreateTUN(tunName, mtu)
+	ifName := InterfaceName(cfg.Name)
+	if err := removeStale(ifName); err != nil {
+		return nil, fmt.Errorf("remove stale interface %s: %w", ifName, err)
+	}
+	tunDev, err := tun.CreateTUN(ifName, mtu)
 	if err != nil {
 		return nil, fmt.Errorf("create tun device (need root?): %w", err)
 	}

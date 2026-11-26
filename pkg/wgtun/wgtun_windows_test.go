@@ -36,6 +36,7 @@ func TestUpConfiguresTheWintunAdapter(t *testing.T) {
 		DNS:             []string{"10.123.0.53"},
 		MTU:             1380,
 		Keepalive:       25,
+		Name:            "https://vpn.example.org",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -46,8 +47,8 @@ func TestUpConfiguresTheWintunAdapter(t *testing.T) {
 			tun.Close()
 		}
 	}()
-	if tun.Name() != tunName {
-		t.Errorf("adapter %q, want %q", tun.Name(), tunName)
+	if want := InterfaceName("https://vpn.example.org"); tun.Name() != want {
+		t.Errorf("adapter %q, want %q", tun.Name(), want)
 	}
 	luid, err := tun.luid()
 	if err != nil {
@@ -103,4 +104,36 @@ func TestUpConfiguresTheWintunAdapter(t *testing.T) {
 			t.Errorf("the adapter outlived Close: %s", a.FriendlyName())
 		}
 	}
+}
+
+// TestTwoServersTwoWintunAdapters holds two tunnels at once, one adapter each, and
+// shows that closing one leaves the other, and that the name can be taken
+// again afterwards. Same conditions as the test above.
+func TestTwoServersTwoWintunAdapters(t *testing.T) {
+	if os.Getenv("CLAIMWARD_WINTUN_TEST") != "1" {
+		t.Skip("set CLAIMWARD_WINTUN_TEST=1, elevated, with wintun.dll beside the test binary")
+	}
+	priv, _ := wgtypes.GeneratePrivateKey()
+	peer, _ := wgtypes.GeneratePrivateKey()
+	mk := func(name, addr string) *Tunnel {
+		t.Helper()
+		tun, err := Up(Config{
+			PrivateKey: priv, ServerPublicKey: peer.PublicKey(),
+			Endpoint: "192.0.2.1:51820", AllowedIPs: []string{"10.200.0.0/16"},
+			Address: addr, MTU: 1380, Name: name,
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		return tun
+	}
+	a := mk("https://a.example.org", "10.201.0.5/32")
+	defer a.Close()
+	b := mk("https://b.example.org", "10.202.0.5/32")
+	if a.Name() == b.Name() {
+		t.Fatalf("two servers share the adapter %q", a.Name())
+	}
+	b.Close()
+	b = mk("https://b.example.org", "10.202.0.5/32")
+	b.Close()
 }

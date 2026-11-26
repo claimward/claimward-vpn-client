@@ -293,8 +293,13 @@ logo) is read at run time from the server's
 (`CLAIMWARD_SERVER`, `CLAIMWARD_AUTH_PROVIDER`, `CLAIMWARD_GITHUB_CLIENT_ID`,
 `CLAIMWARD_OIDC_*`) are gone.
 
-Several servers may be connected at once (one tunnel each on macOS; Linux and
-Windows hold one tunnel for now). A server that announces `exclusive` is refused
+Several servers may be connected at once, one tunnel each on every platform,
+on one deterministic interface per server (`wgtun.InterfaceName(url)`): macOS
+`utunN` (the kernel numbers it), Linux `cw-` and ten hex digits of the URL's
+SHA-256 (13 bytes, within the 15 of `IFNAMSIZ`), Windows the Wintun adapter
+`Claimward <host> <6 hex>`. Reconnecting a server replaces its interface, a
+leftover of that name is removed before it is created, and a TUN device goes
+with its process, so a crashed helper leaves nothing on Linux. A server that announces `exclusive` is refused
 while any other is connected, and any other is refused while an exclusive one
 is: `appcore` and the helper both return `*exclusive.Error`, which names the
 blocking server. Sessions are stored per server (canonical URL + provider id),

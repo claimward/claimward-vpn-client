@@ -460,6 +460,7 @@ func (s *Server) enroll(spec *hproto.ConnectSpec, gen uint64, member *exclusive.
 	if err != nil {
 		return hproto.Response{Error: err.Error()}
 	}
+	cfg.Name = server // one deterministic interface per server
 
 	s.mu.Lock()
 	cur := s.sessions[server]
