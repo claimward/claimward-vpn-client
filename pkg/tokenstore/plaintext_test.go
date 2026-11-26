@@ -85,13 +85,13 @@ func dirHolds(t *testing.T, dir string, secrets ...string) (string, bool) {
 func TestSessionSecretsAreNotStoredInClear(t *testing.T) {
 	dir := isolate(t, sealedBackend{kr: &memKeyring{}})
 	s := &Session{Bearer: "secret-bearer-audit", RefreshToken: "secret-refresh-audit", WGPrivateKey: "secret-wgkey-audit"}
-	if err := Save(s); err != nil {
+	if err := Save(testKey, s); err != nil {
 		t.Fatal(err)
 	}
 	if p, found := dirHolds(t, dir, s.Bearer, s.RefreshToken, s.WGPrivateKey); found {
 		t.Errorf("%s holds a secret in clear", p)
 	}
-	got, err := Load()
+	got, err := Load(testKey)
 	if err != nil || got == nil || *got != *s {
 		t.Fatalf("Load = %+v, %v; want %+v", got, err, s)
 	}
@@ -107,7 +107,10 @@ func TestLoadMigratesTheLegacyPlaintextFile(t *testing.T) {
 	if err := os.WriteFile(legacy, []byte(`{"bearer":"old-bearer-xyz","wg_private_key":"old-key-xyz","tenant":"hpc"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := Load()
+	if adopted, err := AdoptLegacy(testKey); err != nil || !adopted {
+		t.Fatalf("AdoptLegacy = %v, %v", adopted, err)
+	}
+	got, err := Load(testKey)
 	if err != nil || got == nil || got.Bearer != "old-bearer-xyz" || got.Tenant != "hpc" {
 		t.Fatalf("Load = %+v, %v", got, err)
 	}
@@ -117,7 +120,7 @@ func TestLoadMigratesTheLegacyPlaintextFile(t *testing.T) {
 	if p, found := dirHolds(t, dir, "old-bearer-xyz", "old-key-xyz"); found {
 		t.Errorf("%s holds a migrated secret in clear", p)
 	}
-	again, err := Load()
+	again, err := Load(testKey)
 	if err != nil || again == nil || again.Bearer != "old-bearer-xyz" {
 		t.Fatalf("second Load = %+v, %v", again, err)
 	}
@@ -131,22 +134,26 @@ func TestSaveRemovesTheLegacyFileAndClearRemovesEverything(t *testing.T) {
 	if err := os.WriteFile(legacy, []byte(`{"bearer":"old"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := Save(&Session{Bearer: "new"}); err != nil {
+	if err := Save(testKey, &Session{Bearer: "new"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(legacy); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("Save left the plaintext file: %v", err)
 	}
-	if err := Clear(); err != nil {
+	// The legacy session stays until an owner adopts it or it is discarded.
+	if err := DiscardLegacy(); err != nil {
+		t.Fatal(err)
+	}
+	if err := Clear(testKey); err != nil {
 		t.Fatal(err)
 	}
 	if kr.has {
 		t.Error("Clear left the key in the keyring")
 	}
-	if s, err := Load(); s != nil || err != nil {
+	if s, err := Load(testKey); s != nil || err != nil {
 		t.Errorf("Load after Clear = %+v, %v", s, err)
 	}
-	if err := Clear(); err != nil {
+	if err := Clear(testKey); err != nil {
 		t.Errorf("a second Clear: %v", err)
 	}
 }
@@ -155,7 +162,7 @@ func TestSaveRemovesTheLegacyFileAndClearRemovesEverything(t *testing.T) {
 // store, saving fails and says what to install; nothing is written to disk.
 func TestNoSecretStoreRefusesToSaveAndWritesNothing(t *testing.T) {
 	dir := isolate(t, noStore{})
-	err := Save(&Session{Bearer: "secret-b", WGPrivateKey: "secret-k"})
+	err := Save(testKey, &Session{Bearer: "secret-b", WGPrivateKey: "secret-k"})
 	if err == nil || err.Error() != ErrNoSecretStore.Error() {
 		t.Fatalf("Save = %v, want exactly ErrNoSecretStore (not wrapped twice)", err)
 	}
@@ -190,7 +197,7 @@ func TestTheNoStoreErrorIsActionable(t *testing.T) {
 // A backend that fails with its own error still surfaces as ErrNoSecretStore.
 func TestAStoreFailureIsReportedAsNoSecretStore(t *testing.T) {
 	isolate(t, brokenBackend{err: errors.New("keychain locked")})
-	err := Save(&Session{Bearer: "b"})
+	err := Save(testKey, &Session{Bearer: "b"})
 	if !errors.Is(err, ErrNoSecretStore) || !strings.Contains(err.Error(), "keychain locked") {
 		t.Errorf("Save = %v", err)
 	}
@@ -202,13 +209,13 @@ func TestTheOptInVariableHasNoEffect(t *testing.T) {
 	for _, v := range []string{"", "1", "true"} {
 		dir := isolate(t, noStore{})
 		t.Setenv("CLAIMWARD_ALLOW_PLAINTEXT_SESSION", v)
-		if err := Save(&Session{Bearer: "plain-secret"}); !errors.Is(err, ErrNoSecretStore) {
+		if err := Save(testKey, &Session{Bearer: "plain-secret"}); !errors.Is(err, ErrNoSecretStore) {
 			t.Fatalf("value %q: Save = %v, want ErrNoSecretStore", v, err)
 		}
 		if _, err := os.Stat(filepath.Join(dir, "session.json")); err == nil {
 			t.Errorf("value %q: a session.json was written", v)
 		}
-		if s, err := Load(); s != nil || err != nil {
+		if s, err := Load(testKey); s != nil || err != nil {
 			t.Errorf("value %q: Load = %+v, %v", v, s, err)
 		}
 	}
@@ -225,13 +232,13 @@ func TestAFailedMigrationDeletesTheLegacyFile(t *testing.T) {
 	if err := os.WriteFile(legacy, []byte(`{"bearer":"old-secret"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if s, err := Load(); s != nil || err == nil || err.Error() != ErrNoSecretStore.Error() {
+	if s, err := Load(testKey); s != nil || err == nil || err.Error() != ErrNoSecretStore.Error() {
 		t.Fatalf("Load = %+v, %v, want exactly ErrNoSecretStore", s, err)
 	}
 	if _, err := os.Stat(legacy); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("the plaintext file was kept: %v", err)
 	}
-	if s, err := Load(); s != nil || err != nil {
+	if s, err := Load(testKey); s != nil || err != nil {
 		t.Errorf("second Load = %+v, %v, want nothing", s, err)
 	}
 }
@@ -258,7 +265,7 @@ func TestAMigrationFailingWithAStoreErrorIsReported(t *testing.T) {
 func TestSealedSessionRefusesTamperingAndALostKey(t *testing.T) {
 	kr := &memKeyring{}
 	dir := isolate(t, sealedBackend{kr: kr})
-	if err := Save(&Session{Bearer: "b"}); err != nil {
+	if err := Save(testKey, &Session{Bearer: "b"}); err != nil {
 		t.Fatal(err)
 	}
 	enc := filepath.Join(dir, "session.enc")
@@ -271,31 +278,31 @@ func TestSealedSessionRefusesTamperingAndALostKey(t *testing.T) {
 	if err := os.WriteFile(enc, bad, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if s, err := Load(); err == nil {
+	if s, err := Load(testKey); err == nil {
 		t.Errorf("a tampered blob loaded: %+v", s)
 	}
 	if err := os.WriteFile(enc, blob[:3], 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if s, err := Load(); err == nil {
+	if s, err := Load(testKey); err == nil {
 		t.Errorf("a truncated blob loaded: %+v", s)
 	}
 	if err := os.WriteFile(enc, blob, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	kr.del()
-	if s, err := Load(); err == nil {
+	if s, err := Load(testKey); err == nil {
 		t.Errorf("a blob loaded without its key: %+v", s)
 	}
 	kr.v, kr.has = "zz", true
-	if s, err := Load(); err == nil {
+	if s, err := Load(testKey); err == nil {
 		t.Errorf("a malformed key loaded a blob: %+v", s)
 	}
 }
 
 func TestSaveSurfacesAKeyringFailureAsNoSecretStore(t *testing.T) {
 	isolate(t, sealedBackend{kr: &memKeyring{fail: errors.New("locked")}})
-	if err := Save(&Session{Bearer: "b"}); !errors.Is(err, ErrNoSecretStore) {
+	if err := Save(testKey, &Session{Bearer: "b"}); !errors.Is(err, ErrNoSecretStore) {
 		t.Fatalf("Save = %v, want ErrNoSecretStore", err)
 	}
 }

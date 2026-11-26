@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/claimward/claimward-vpn-client/pkg/exclusive"
 	"github.com/claimward/claimward-vpn-client/pkg/hproto"
 )
 
@@ -23,30 +24,42 @@ func New(socketPath string) *Client {
 	return &Client{SocketPath: socketPath}
 }
 
-// Connect asks the helper to enroll, bring the tunnel up and watch routes.
+// Connect asks the helper to enroll, bring the server's tunnel up and watch
+// routes. A refusal because a server is exclusive is an *exclusive.Error
+// (errors.As), naming the server in the way.
 func (c *Client) Connect(spec hproto.ConnectSpec) (*hproto.Response, error) {
-	return c.call(60*time.Second, hproto.Request{Action: hproto.ActionConnect, Connect: &spec})
+	return c.call(60*time.Second, hproto.Request{Action: hproto.ActionConnect, Connect: &spec}, spec.ServerURL)
 }
 
-// Tenants asks the helper which tenants the bearer may connect to.
-func (c *Client) Tenants(serverURL, bearer string) (*hproto.Response, error) {
-	return c.call(30*time.Second, hproto.Request{Action: hproto.ActionTenants, Connect: &hproto.ConnectSpec{ServerURL: serverURL, Bearer: bearer}})
+// Tenants asks the helper which tenants the bearer may connect to at the
+// server, signed in with the provider.
+func (c *Client) Tenants(serverURL, provider, bearer string) (*hproto.Response, error) {
+	return c.call(30*time.Second, hproto.Request{Action: hproto.ActionTenants,
+		Connect: &hproto.ConnectSpec{ServerURL: serverURL, Provider: provider, Bearer: bearer}}, serverURL)
 }
 
-// Renew hands the helper a fresh bearer for the tunnel it holds, and has it
-// renew the lease with it now.
-func (c *Client) Renew(bearer string) (*hproto.Response, error) {
-	return c.call(45*time.Second, hproto.Request{Action: hproto.ActionRenew, Connect: &hproto.ConnectSpec{Bearer: bearer}})
+// Renew hands the helper a fresh bearer for the tunnel it holds to the
+// server, and has it renew that lease with it now.
+func (c *Client) Renew(serverURL, provider, bearer string) (*hproto.Response, error) {
+	return c.call(45*time.Second, hproto.Request{Action: hproto.ActionRenew,
+		Connect: &hproto.ConnectSpec{ServerURL: serverURL, Provider: provider, Bearer: bearer}}, serverURL)
 }
 
-// Down tears the tunnel down.
-func (c *Client) Down() (*hproto.Response, error) {
-	return c.call(15*time.Second, hproto.Request{Action: hproto.ActionDown})
+// Down tears the server's tunnel down.
+func (c *Client) Down(serverURL string) (*hproto.Response, error) {
+	return c.call(15*time.Second, hproto.Request{Action: hproto.ActionDown,
+		Connect: &hproto.ConnectSpec{ServerURL: serverURL}}, serverURL)
 }
 
-// Status queries the helper's state, briefly: the UI asks it periodically.
+// DownAll tears every tunnel down.
+func (c *Client) DownAll() (*hproto.Response, error) {
+	return c.call(30*time.Second, hproto.Request{Action: hproto.ActionDown}, "")
+}
+
+// Status queries the helper's state, briefly: the UI asks it periodically. It
+// answers for every server.
 func (c *Client) Status() (*hproto.Response, error) {
-	return c.call(3*time.Second, hproto.Request{Action: hproto.ActionStatus})
+	return c.call(3*time.Second, hproto.Request{Action: hproto.ActionStatus}, "")
 }
 
 // Available reports whether the helper's socket answers.
@@ -59,7 +72,7 @@ func (c *Client) Available() bool {
 	return true
 }
 
-func (c *Client) call(timeout time.Duration, req hproto.Request) (*hproto.Response, error) {
+func (c *Client) call(timeout time.Duration, req hproto.Request, server string) (*hproto.Response, error) {
 	conn, err := net.DialTimeout("unix", c.SocketPath, timeout)
 	if err != nil {
 		return nil, fmt.Errorf("helper not reachable at %s (is it installed and running?): %w", c.SocketPath, err)
@@ -74,6 +87,13 @@ func (c *Client) call(timeout time.Duration, req hproto.Request) (*hproto.Respon
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 	if !resp.OK && resp.Error != "" {
+		if resp.ErrorCode == hproto.ErrExclusive {
+			return &resp, &exclusive.Error{
+				Server:  exclusive.Member{URL: server},
+				Blocker: exclusive.Member{Name: resp.BlockedBy},
+				Reason:  "helper: " + resp.Error,
+			}
+		}
 		return &resp, fmt.Errorf("helper: %s", resp.Error)
 	}
 	return &resp, nil

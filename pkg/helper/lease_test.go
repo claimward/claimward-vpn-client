@@ -1,6 +1,7 @@
 package helper
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/claimward/claimward-vpn-client/pkg/exclusive"
 	"github.com/claimward/claimward-vpn-client/pkg/hproto"
 	"github.com/claimward/claimward-vpn-client/pkg/protocol"
 	"github.com/claimward/claimward-vpn-client/pkg/wgkey"
@@ -127,6 +129,9 @@ func leasedHelper(t *testing.T, servers ...string) (*Server, func() []*fakeTunne
 	}
 	s.renewAfter = func(time.Duration) time.Duration { return 5 * time.Millisecond }
 	s.retryAfter = 5 * time.Millisecond
+	s.UseDiscovery(func(context.Context, string) (*protocol.Configuration, error) {
+		return &protocol.Configuration{Version: 2}, nil
+	})
 	t.Cleanup(s.Shutdown)
 	return s, func() []*fakeTunnel {
 		mu.Lock()
@@ -158,7 +163,7 @@ func TestTheHelperRenewsTheLease(t *testing.T) {
 	s, _ := leasedHelper(t, v.URL)
 	spec, pub := connectSpec(t, v.URL)
 	r := s.connect(spec)
-	if !r.OK || r.LeaseExpiresAt == nil {
+	if !r.OK || len(r.Tunnels) != 1 || r.Tunnels[0].LeaseExpiresAt == nil {
 		t.Fatalf("connect: %+v", r)
 	}
 	eventually(t, "two renewals", func() bool { return v.count(func(v *leaseServer) int { return len(v.heartbeats) }) >= 2 })
@@ -167,7 +172,7 @@ func TestTheHelperRenewsTheLease(t *testing.T) {
 			t.Errorf("renewed %q, want the enrolled key with the session's bearer", v.heartbeats[0])
 		}
 	})
-	if st := s.status(); !st.Connected || st.LastError != "" {
+	if st := s.status(); len(st.Tunnels) != 1 || len(st.LastErrors) != 0 {
 		t.Errorf("status: %+v", st)
 	}
 }
@@ -183,7 +188,7 @@ func TestAForgottenDeviceEnrollsAgain(t *testing.T) {
 		t.Fatal(r.Error)
 	}
 	eventually(t, "a second enrollment", func() bool { return v.count(func(v *leaseServer) int { return len(v.enrolled) }) == 2 })
-	eventually(t, "the tunnel brought up again", func() bool { return s.status().Connected && len(tuns()) == 2 })
+	eventually(t, "the tunnel brought up again", func() bool { return isUp(s) && len(tuns()) == 2 })
 	v.set(func(v *leaseServer) {
 		if v.enrolled[1] != pub {
 			t.Errorf("enrolled again with %s, want %s", v.enrolled[1], pub)
@@ -206,9 +211,9 @@ func TestAForgottenDeviceThatCannotEnrollIsTakenDown(t *testing.T) {
 		t.Fatal(r.Error)
 	}
 	v.set(func(v *leaseServer) { v.forget, v.failEnroll = true, true })
-	eventually(t, "down", func() bool { return !s.status().Connected })
-	if st := s.status(); !strings.Contains(st.LastError, "re-enrollment failed") || !strings.Contains(st.LastError, "invalid_token") {
-		t.Errorf("last error %q", st.LastError)
+	eventually(t, "down", func() bool { return !isUp(s) })
+	if e := s.status().LastErrors[v.URL]; !strings.Contains(e, "re-enrollment failed") || !strings.Contains(e, "invalid_token") {
+		t.Errorf("last error %q", e)
 	}
 	if !tuns()[0].isClosed() {
 		t.Error("the tunnel was left up")
@@ -225,9 +230,9 @@ func TestWithdrawnAccessTakesTheTunnelDown(t *testing.T) {
 		t.Fatal(r.Error)
 	}
 	v.set(func(v *leaseServer) { v.answer["tok"], v.code = http.StatusForbidden, "not_a_member" })
-	eventually(t, "down", func() bool { return !s.status().Connected })
-	if st := s.status(); !strings.Contains(st.LastError, "not_a_member") {
-		t.Errorf("last error %q", st.LastError)
+	eventually(t, "down", func() bool { return !isUp(s) })
+	if e := s.status().LastErrors[v.URL]; !strings.Contains(e, "not_a_member") {
+		t.Errorf("last error %q", e)
 	}
 	if !tuns()[0].isClosed() {
 		t.Error("the tunnel was left up")
@@ -245,12 +250,12 @@ func TestAnExpiredBearerWaitsForAFreshOne(t *testing.T) {
 		t.Fatal(r.Error)
 	}
 	v.set(func(v *leaseServer) { v.answer["tok"], v.code = http.StatusUnauthorized, "invalid_token" })
-	eventually(t, "a failed renewal", func() bool { return strings.Contains(s.status().LastError, "invalid_token") })
-	if !s.status().Connected {
+	eventually(t, "a failed renewal", func() bool { return strings.Contains(s.status().LastErrors[v.URL], "invalid_token") })
+	if !isUp(s) {
 		t.Fatal("an expired bearer took the tunnel down")
 	}
-	r := s.renewNow(&hproto.ConnectSpec{Bearer: "fresh"})
-	if !r.OK || r.LastError != "" || r.LeaseExpiresAt == nil {
+	r := s.renewNow(&hproto.ConnectSpec{ServerURL: v.URL, Bearer: "fresh"})
+	if !r.OK || len(r.LastErrors) != 0 || len(r.Tunnels) != 1 || r.Tunnels[0].LeaseExpiresAt == nil {
 		t.Fatalf("renew: %+v", r)
 	}
 	before := v.count(func(v *leaseServer) int { return len(v.heartbeats) })
@@ -264,7 +269,7 @@ func TestAnExpiredBearerWaitsForAFreshOne(t *testing.T) {
 	})
 	// A renewal the server refuses outright says so to the app.
 	v.set(func(v *leaseServer) { v.answer["fresh"] = http.StatusUnauthorized })
-	if r := s.renewNow(&hproto.ConnectSpec{Bearer: "fresh"}); r.OK || !strings.Contains(r.Error, "invalid_token") {
+	if r := s.renewNow(&hproto.ConnectSpec{ServerURL: v.URL, Bearer: "fresh"}); r.OK || !strings.Contains(r.Error, "invalid_token") {
 		t.Errorf("a refused renewal: %+v", r)
 	}
 }
@@ -273,7 +278,7 @@ func TestAnExpiredBearerWaitsForAFreshOne(t *testing.T) {
 func TestRenewNeedsALiveTunnelAndABearer(t *testing.T) {
 	v := newLeaseServer(t)
 	s, _ := leasedHelper(t, v.URL)
-	if r := s.renewNow(&hproto.ConnectSpec{Bearer: "tok"}); r.OK || r.Error != "not connected" {
+	if r := s.renewNow(&hproto.ConnectSpec{ServerURL: v.URL, Bearer: "tok"}); r.OK || r.Error != "not connected" {
 		t.Errorf("renew while down: %+v", r)
 	}
 	if r := s.renewNow(nil); r.OK {
@@ -288,7 +293,7 @@ func TestRenewNeedsALiveTunnelAndABearer(t *testing.T) {
 		t.Fatal(r.Error)
 	}
 	v.set(func(v *leaseServer) { v.answer["tok"], v.code = http.StatusForbidden, "key_not_registered" })
-	if r := s.renewNow(&hproto.ConnectSpec{Bearer: "tok"}); r.OK || r.Connected || !strings.Contains(r.Error, "key_not_registered") {
+	if r := s.renewNow(&hproto.ConnectSpec{ServerURL: v.URL, Bearer: "tok"}); r.OK || !strings.Contains(r.Error, "key_not_registered") {
 		t.Errorf("renew refused: %+v", r)
 	}
 }
@@ -302,7 +307,7 @@ func TestDownDeregisters(t *testing.T) {
 	if r := s.connect(spec); !r.OK {
 		t.Fatal(r.Error)
 	}
-	if r := s.down(); !r.OK {
+	if r := s.down(&hproto.ConnectSpec{ServerURL: v.URL}); !r.OK {
 		t.Fatal(r.Error)
 	}
 	v.set(func(v *leaseServer) {
@@ -311,14 +316,15 @@ func TestDownDeregisters(t *testing.T) {
 		}
 	})
 	// Down again: nothing to give back.
-	s.down()
+	s.down(nil)
 	if n := v.count(func(v *leaseServer) int { return len(v.deregisters) }); n != 1 {
 		t.Errorf("%d deregistrations", n)
 	}
 }
 
-// Connecting elsewhere gives back the previous enrollment; connecting again
-// with the same key to the same server does not, since that is this one.
+// Connecting again to the same server with another key gives back the
+// previous enrollment; with the same key it does not, since that is this one;
+// and connecting to a second server leaves the first one's alone.
 func TestReconnectingGivesBackOnlyAnotherEnrollment(t *testing.T) {
 	a, b := newLeaseServer(t), newLeaseServer(t)
 	s, _ := leasedHelper(t, a.URL, b.URL)
@@ -333,6 +339,13 @@ func TestReconnectingGivesBackOnlyAnotherEnrollment(t *testing.T) {
 	other := *spec
 	other.ServerURL = b.URL
 	if r := s.connect(&other); !r.OK {
+		t.Fatal(r.Error)
+	}
+	if n := a.count(func(v *leaseServer) int { return len(v.deregisters) }); n != 0 {
+		t.Fatalf("a second server gave a's enrollment back (%d)", n)
+	}
+	another, _ := connectSpec(t, a.URL)
+	if r := s.connect(another); !r.OK {
 		t.Fatal(r.Error)
 	}
 	eventually(t, "a gives the old enrollment back", func() bool { return a.count(func(v *leaseServer) int { return len(v.deregisters) }) == 1 })
@@ -356,33 +369,34 @@ func TestASupersededReEnrollmentGivesWay(t *testing.T) {
 	}
 	stale := s.status()
 	s.mu.Lock()
-	gen := s.sess.gen
+	gen := s.sessions[v.URL].gen
 	s.mu.Unlock()
+	member := &exclusive.Member{URL: v.URL}
 
 	// Raced by a re-enrollment of the same key: the live tunnel stays.
 	s.mu.Lock()
 	s.gen++ // as if another session had taken over
-	s.sess.gen = s.gen
+	s.sessions[v.URL].gen = s.gen
 	s.mu.Unlock()
-	if r := s.enroll(spec, gen); r.Error != superseded {
+	if r := s.enroll(spec, gen, member); r.Error != superseded {
 		t.Fatalf("stale re-enrollment: %+v", r)
 	}
 	if n := v.count(func(v *leaseServer) int { return len(v.deregisters) }); n != 0 {
 		t.Errorf("the live key was deregistered (%d)", n)
 	}
-	if st := s.status(); !st.Connected || st.AssignedIP != stale.AssignedIP || len(tuns()) != 1 {
+	if st := s.status(); len(st.Tunnels) != 1 || st.Tunnels[0].AssignedIP != stale.Tunnels[0].AssignedIP || len(tuns()) != 1 {
 		t.Errorf("the live tunnel was touched: %+v, %d tunnels", st, len(tuns()))
 	}
 
 	// Disconnected meanwhile: what it enrolled is given back.
-	s.down()
-	if r := s.enroll(spec, gen); r.Error != superseded {
+	s.down(nil)
+	if r := s.enroll(spec, gen, member); r.Error != superseded {
 		t.Fatalf("re-enrollment after down: %+v", r)
 	}
 	if n := v.count(func(v *leaseServer) int { return len(v.deregisters) }); n != 2 {
 		t.Errorf("%d deregistrations, want the down's and the stale enrollment's", n)
 	}
-	if s.status().Connected {
+	if isUp(s) {
 		t.Error("a stale re-enrollment brought the tunnel back after a disconnect")
 	}
 }

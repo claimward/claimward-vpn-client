@@ -212,11 +212,15 @@ func TestAFailedRefreshKeepsTheCachedDocument(t *testing.T) {
 
 func TestFetchRefuses(t *testing.T) {
 	for name, h := range map[string]http.HandlerFunc{
-		"404":      func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) },
-		"redirect": func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "http://127.0.0.1:1/x", http.StatusFound) },
-		"html":     func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("<html>")) },
-		"version":  func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"version":3,"providers":[]}`)) },
-		"huge":     func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(strings.Repeat(" ", MaxDocumentBytes+1))) },
+		"404": func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) },
+		"redirect": func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "http://127.0.0.1:1/x", http.StatusFound)
+		},
+		"html":    func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("<html>")) },
+		"version": func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"version":3,"providers":[]}`)) },
+		"huge": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(strings.Repeat(" ", MaxDocumentBytes+1)))
+		},
 	} {
 		srv := httptest.NewServer(h)
 		_, err := New(nil).Get(context.Background(), srv.URL)

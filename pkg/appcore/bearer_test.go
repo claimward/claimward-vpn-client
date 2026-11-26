@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/claimward/claimward-vpn-client/pkg/auth"
+	"github.com/claimward/claimward-vpn-client/pkg/protocol"
 	"github.com/claimward/claimward-vpn-client/pkg/tokenstore"
 	"github.com/claimward/claimward-vpn-client/pkg/wgkey"
 )
@@ -82,13 +83,15 @@ func TestGoAuthnRegistersThePublicKeyFirst(t *testing.T) {
 	}
 }
 
-func TestGoAuthnIsAValidProvider(t *testing.T) {
-	c := Config{ServerURL: "https://vpn.example.org", Provider: "go-authn", OIDCIssuer: "https://login.example.org"}
-	if err := c.Validate(); err == nil {
-		t.Error("go-authn without a client id was valid")
+// The server's document gives a provider's parameters; go-authn needs both
+// an issuer and a client id.
+func TestGoAuthnIsBuiltFromTheServersDocument(t *testing.T) {
+	p := protocol.Provider{ID: "lab", Kind: protocol.KindGoAuthn, Name: "Lab", OIDCIssuer: "https://login.example.org"}
+	if _, err := auth.New(authConfig(p)); err == nil {
+		t.Error("go-authn without a client id was built")
 	}
-	c.OIDCClientID = "claimward"
-	if err := c.Validate(); err != nil {
+	p.OIDCClientID = "claimward"
+	if _, err := auth.New(authConfig(p)); err != nil {
 		t.Error(err)
 	}
 }

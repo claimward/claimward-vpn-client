@@ -60,18 +60,18 @@ func TestNoConfigDirIsReportedEverywhere(t *testing.T) {
 	t.Cleanup(func() { store = old })
 
 	store = sealedBackend{kr: &memKeyring{}}
-	if _, err := Load(); err == nil {
+	if _, err := Load(testKey); err == nil {
 		t.Error("sealed Load: no error")
 	}
-	if err := Save(&Session{Bearer: "b"}); err == nil {
+	if err := Save(testKey, &Session{Bearer: "b"}); err == nil {
 		t.Error("sealed Save: no error")
 	}
-	if err := Clear(); err == nil {
+	if err := Clear(testKey); err == nil {
 		t.Error("sealed Clear: no error")
 	}
 
 	store = noStore{} // Load falls to the legacy file, whose path cannot be found
-	if _, err := Load(); err == nil {
+	if _, err := Load(testKey); err == nil {
 		t.Error("migrate: no error")
 	}
 }
@@ -96,13 +96,13 @@ func blockConfigDir(t *testing.T) string {
 func TestAnUnreadableOrUnwritableConfigDirIsReported(t *testing.T) {
 	blockConfigDir(t)
 	store = sealedBackend{kr: &memKeyring{}}
-	if _, err := Load(); err == nil {
+	if _, err := Load(testKey); err == nil {
 		t.Error("sealed Load: no error") // reading session.enc fails
 	}
-	if err := Save(&Session{Bearer: "b"}); err == nil {
+	if err := Save(testKey, &Session{Bearer: "b"}); err == nil {
 		t.Error("sealed Save: no error") // MkdirAll fails
 	}
-	if err := Clear(); err == nil {
+	if err := Clear(testKey); err == nil {
 		t.Error("sealed Clear: no error") // removing session.enc fails
 	}
 }
@@ -144,11 +144,11 @@ func TestRemoveIfPresent(t *testing.T) {
 
 func TestLoadReportsABackendFailureAndUnparsableData(t *testing.T) {
 	isolate(t, brokenBackend{err: errors.New("denied")})
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "denied") {
+	if _, err := Load(testKey); err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Errorf("Load = %v, want the backend's error", err)
 	}
 	store = brokenBackend{data: []byte("not json")}
-	if _, err := Load(); err == nil {
+	if _, err := Load(testKey); err == nil {
 		t.Error("unparsable stored data loaded")
 	}
 }
@@ -161,7 +161,7 @@ func TestMigrateReportsAnUnparsableLegacyFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "session.json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(); err == nil {
+	if _, err := Load(testKey); err == nil {
 		t.Error("an unparsable legacy file loaded")
 	}
 }
@@ -180,7 +180,7 @@ func TestAMalformedSealingKeyIsRefused(t *testing.T) {
 	for _, bad := range []string{"zz", "00ff", ""} {
 		kr := &memKeyring{v: bad, has: true}
 		isolate(t, sealedBackend{kr: kr})
-		if err := Save(&Session{Bearer: "b"}); err == nil || !strings.Contains(err.Error(), "malformed") {
+		if err := Save(testKey, &Session{Bearer: "b"}); err == nil || !strings.Contains(err.Error(), "malformed") {
 			t.Errorf("key %q: Save = %v, want a malformed-key error", bad, err)
 		}
 	}
@@ -189,7 +189,7 @@ func TestAMalformedSealingKeyIsRefused(t *testing.T) {
 func TestAKeyringReadFailureIsNotAMissingKey(t *testing.T) {
 	kr := &failingGet{}
 	isolate(t, sealedBackend{kr: kr})
-	if err := Save(&Session{Bearer: "b"}); err == nil {
+	if err := Save(testKey, &Session{Bearer: "b"}); err == nil {
 		t.Fatal("Save: no error")
 	}
 	if kr.sets != 0 {
@@ -198,14 +198,14 @@ func TestAKeyringReadFailureIsNotAMissingKey(t *testing.T) {
 	// A session already sealed cannot be opened without the key.
 	kr2 := &memKeyring{}
 	dir := isolate(t, sealedBackend{kr: kr2})
-	if err := Save(&Session{Bearer: "b"}); err != nil {
+	if err := Save(testKey, &Session{Bearer: "b"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "session.enc")); err != nil {
 		t.Fatal(err)
 	}
 	store = sealedBackend{kr: &failingGet{}}
-	if _, err := Load(); err == nil || strings.Contains(err.Error(), "log in again") {
+	if _, err := Load(testKey); err == nil || strings.Contains(err.Error(), "log in again") {
 		t.Errorf("Load = %v, want the keyring's own error", err)
 	}
 }

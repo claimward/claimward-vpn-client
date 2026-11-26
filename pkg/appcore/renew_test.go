@@ -34,25 +34,25 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // helper renews the lease with them; disconnecting stops that and gives
 // the address back.
 func TestTheAppKeepsTheLeaseRenewed(t *testing.T) {
-	c, asked := world(t)
+	c, asked, url := world(t)
 	c.renewAfter = func(time.Duration) time.Duration { return 5 * time.Millisecond }
-	if err := c.SetTenant(""); err != nil {
+	if err := c.SetTenant(url, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Tenants(context.Background()); err != nil {
+	if _, err := c.Tenants(context.Background(), url); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.SetTenant("hpc"); err != nil {
+	if err := c.SetTenant(url, "hpc"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Connect(context.Background()); err != nil {
+	if err := c.Connect(context.Background(), url); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "renewals", func() bool { return len(askedOf(asked, "heartbeat")) >= 2 })
 	if hb := askedOf(asked, "heartbeat"); hb[0] != "heartbeat Bearer a.b.c" {
 		t.Errorf("renewed with %q", hb[0])
 	}
-	if err := c.Disconnect(context.Background()); err != nil {
+	if err := c.Disconnect(context.Background(), url); err != nil {
 		t.Fatal(err)
 	}
 	if d := askedOf(asked, "deregister"); len(d) != 1 {
@@ -68,42 +68,41 @@ func TestTheAppKeepsTheLeaseRenewed(t *testing.T) {
 // An app restarted under a running tunnel renews it too, from its first
 // Status; and stops when the helper no longer has a tunnel.
 func TestARestartedAppRenewsATunnelItDidNotBringUp(t *testing.T) {
-	c, asked := world(t)
-	if _, err := c.Tenants(context.Background()); err != nil {
+	c, asked, url := world(t)
+	if _, err := c.Tenants(context.Background(), url); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.SetTenant("hpc"); err != nil {
+	if err := c.SetTenant(url, "hpc"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Connect(context.Background()); err != nil {
+	if err := c.Connect(context.Background(), url); err != nil {
 		t.Fatal(err)
 	}
-	c.Disconnect(context.Background()) // stops c's loop; brought up again below
-	if err := c.Connect(context.Background()); err != nil {
+	c.Disconnect(context.Background(), url) // stops c's loop; brought up again below
+	if err := c.Connect(context.Background(), url); err != nil {
 		t.Fatal(err)
 	}
 	c.mu.Lock()
-	c.stopRenew()
+	c.state[url].stopRenew()
 	c.mu.Unlock()
 
-	restarted := New(&Config{ServerURL: c.Config().ServerURL, Provider: "oidc", OIDCIssuer: "https://login.example.org",
-		OIDCClientID: "claimward", SocketPath: c.Config().SocketPath})
+	restarted := New(&Config{Servers: c.Config().Servers, SocketPath: c.Config().SocketPath})
 	restarted.renewAfter = func(time.Duration) time.Duration { return 5 * time.Millisecond }
 	before := len(askedOf(asked, "heartbeat"))
-	if st := restarted.Status(); !st.Connected {
+	if st := only(t, restarted, url); !st.Connected {
 		t.Fatal("not connected")
 	}
 	waitFor(t, "renewals from the restarted app", func() bool { return len(askedOf(asked, "heartbeat")) >= before+2 })
 
 	// The helper's tunnel goes away under it: the loop notices and ends,
 	// and the next Status may start another.
-	if _, err := restarted.helper.Down(); err != nil {
+	if _, err := restarted.helper.DownAll(); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "the loop to end", func() bool {
 		restarted.mu.Lock()
 		defer restarted.mu.Unlock()
-		return restarted.stopRenew == nil
+		return restarted.state[url].stopRenew == nil
 	})
 }
 

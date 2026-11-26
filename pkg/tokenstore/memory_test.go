@@ -14,22 +14,22 @@ func TestUseMemoryKeepsTheSessionInMemoryOnly(t *testing.T) {
 	t.Setenv("AppData", filepath.Join(home, "AppData"))
 
 	restore := UseMemory()
-	if s, err := Load(); s != nil || err != nil {
+	if s, err := Load(testKey); s != nil || err != nil {
 		t.Fatalf("empty Load = %+v, %v", s, err)
 	}
-	if err := Save(&Session{Bearer: "mem-secret"}); err != nil {
+	if err := Save(testKey, &Session{Bearer: "mem-secret"}); err != nil {
 		t.Fatal(err)
 	}
-	if s, err := Load(); err != nil || s == nil || s.Bearer != "mem-secret" {
+	if s, err := Load(testKey); err != nil || s == nil || s.Bearer != "mem-secret" {
 		t.Fatalf("Load = %+v, %v", s, err)
 	}
 	if _, found := dirHolds(t, home, "mem-secret"); found {
 		t.Error("the memory store wrote to disk")
 	}
-	if err := Clear(); err != nil {
+	if err := Clear(testKey); err != nil {
 		t.Fatal(err)
 	}
-	if s, _ := Load(); s != nil {
+	if s, _ := Load(testKey); s != nil {
 		t.Error("session survives Clear")
 	}
 	restore()

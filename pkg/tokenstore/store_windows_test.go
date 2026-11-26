@@ -11,7 +11,7 @@ import (
 func TestDPAPIRoundTrip(t *testing.T) {
 	dir := isolate(t, dpapi{})
 	s := &Session{Bearer: "dpapi-bearer-secret", RefreshToken: "dpapi-refresh-secret", WGPrivateKey: "dpapi-key-secret"}
-	if err := Save(s); err != nil {
+	if err := Save(testKey, s); err != nil {
 		t.Fatal(err)
 	}
 	if p, found := dirHolds(t, dir, s.Bearer, s.RefreshToken, s.WGPrivateKey); found {
@@ -20,14 +20,14 @@ func TestDPAPIRoundTrip(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "session.dpapi")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := Load()
+	got, err := Load(testKey)
 	if err != nil || got == nil || *got != *s {
 		t.Fatalf("Load = %+v, %v", got, err)
 	}
-	if err := Clear(); err != nil {
+	if err := Clear(testKey); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := Load(); got != nil {
+	if got, _ := Load(testKey); got != nil {
 		t.Error("session survives Clear")
 	}
 }

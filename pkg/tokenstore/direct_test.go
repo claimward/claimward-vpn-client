@@ -66,7 +66,7 @@ func TestKeyringFailuresKeepTheirOwnMessage(t *testing.T) {
 
 func TestClearReportsABackendFailure(t *testing.T) {
 	isolate(t, brokenBackend{err: errors.New("denied")})
-	if err := Clear(); err == nil || !strings.Contains(err.Error(), "denied") {
+	if err := Clear(testKey); err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Errorf("Clear = %v, want the backend's error", err)
 	}
 }
@@ -93,7 +93,7 @@ func TestMigrateReportsALegacyFileItCannotRemove(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chmod(dir, 0o700) })
-	if s, err := Load(); err == nil {
+	if s, err := Load(testKey); err == nil {
 		t.Errorf("Load = %+v, want the remove error", s)
 	}
 }
