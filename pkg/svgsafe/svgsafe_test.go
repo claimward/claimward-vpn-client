@@ -59,6 +59,46 @@ func TestRefusesWhatCouldRunOrFetch(t *testing.T) {
 	}
 }
 
+// Each guard is held by a test that names ITS refusal: a table that only asks
+// for "some error" lets a neighbouring guard hide a deleted one.
+func TestEachRefusalIsItsOwn(t *testing.T) {
+	for name, tc := range map[string]struct{ doc, want string }{
+		"empty":             {``, "exactly one <svg> root"},
+		"two roots":         {open + `</svg>` + open + `</svg>`, "exactly one <svg> root"},
+		"not xml":           {`<svg xmlns="http://www.w3.org/2000/svg"><rect></svg>`, "not well-formed"},
+		"garbage":           {`<<<`, "not well-formed"},
+		"root not svg":      {`<html xmlns="http://www.w3.org/2000/svg"/>`, "must be <svg>"},
+		"root wrong ns":     {`<svg/>`, "not in the SVG namespace"},
+		"js in any attr":    {open + `<rect foo="javascript:x()"/></svg>`, "javascript: or data:"},
+		"data in any attr":  {open + `<rect foo="DATA:text/html,x"/></svg>`, "javascript: or data:"},
+		"style attr import": {open + `<rect style="@import 'x'"/></svg>`, "@import"},
+		"style attr expr":   {open + `<rect style="width:expression(1)"/></svg>`, "active CSS"},
+		"style attr behav":  {open + `<rect style="behavior:x"/></svg>`, "active CSS"},
+		"style attr moz":    {open + `<rect style="-moz-binding:x"/></svg>`, "active CSS"},
+		"style attr esc":    {open + `<rect style="a\75rl(x)"/></svg>`, "CSS escape"},
+		"style el expr":     {open + `<style>a{width:expression(1)}</style></svg>`, "active CSS"},
+		"style el behav":    {open + `<style>a{behavior:x}</style></svg>`, "active CSS"},
+		"style el moz":      {open + `<style>a{-moz-binding:x}</style></svg>`, "active CSS"},
+		"style el esc":      {open + `<style>a{b:\75rl(x)}</style></svg>`, "CSS escape"},
+		"second url":        {open + `<rect fill="url(#a) url(http://x)"/></svg>`, "outside the image"},
+	} {
+		err := Validate([]byte(tc.doc))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want one containing %q", name, err, tc.want)
+		}
+	}
+}
+
+func TestTruncate(t *testing.T) {
+	long := strings.Repeat("a", 41)
+	if got := truncate(long); got != strings.Repeat("a", 40)+"…" {
+		t.Errorf("41 bytes: %q", got)
+	}
+	if got := truncate(long[:40]); got != long[:40] {
+		t.Errorf("40 bytes: %q", got)
+	}
+}
+
 // Bombs: the answer is a refusal, and it comes without reading the whole input
 // into a tree.
 func TestBombsAreRefused(t *testing.T) {

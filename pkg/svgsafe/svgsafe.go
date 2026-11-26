@@ -48,15 +48,18 @@ func Validate(b []byte) error {
 	if len(b) > MaxSize {
 		return fmt.Errorf("svg: %d bytes, more than the %d allowed", len(b), MaxSize)
 	}
-	if len(b) == 0 {
-		return errors.New("svg: empty")
-	}
 	dec := xml.NewDecoder(bytes.NewReader(b))
 	dec.Strict = true
 	dec.Entity = nil // the five predefined entities only
 	depth, elements, roots := 0, 0, 0
 	inStyle := 0
-	for {
+	for tokens := 0; ; tokens++ {
+		// A bound, not an argument: every token consumes at least one byte, so
+		// more tokens than bytes means the decoder is repeating itself (it
+		// returns the same syntax error for ever).
+		if tokens > len(b) {
+			return errors.New("svg: the decoder made no progress")
+		}
 		tok, err := dec.Token()
 		if err == io.EOF {
 			break
@@ -82,8 +85,10 @@ func Validate(b []byte) error {
 			}
 			if depth == 1 {
 				roots++
-				if roots > 1 || t.Name.Local != "svg" || t.Name.Space != svgNS {
-					return errors.New("svg: the root element must be a single <svg> in the namespace " + svgNS)
+				// A second root is counted here and refused after the loop; the
+				// namespace of every element, this one included, is checked below.
+				if t.Name.Local != "svg" {
+					return errors.New("svg: the root element must be <svg>")
 				}
 			}
 			name := strings.ToLower(t.Name.Local)
@@ -117,7 +122,7 @@ func Validate(b []byte) error {
 		}
 	}
 	if roots != 1 {
-		return errors.New("svg: no <svg> root element")
+		return fmt.Errorf("svg: exactly one <svg> root element is required, found %d", roots)
 	}
 	return nil
 }
