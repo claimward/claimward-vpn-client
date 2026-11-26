@@ -73,10 +73,10 @@ func Obtain(prompt string) ([]byte, error) {
 	defer C.free(unsafe.Pointer(cr))
 	defer C.free(unsafe.Pointer(cp))
 	out := make([]byte, FormLength)
-	if st := C.cw_obtain(cr, cp, (*C.uchar)(unsafe.Pointer(&out[0]))); st != 0 {
-		return nil, fmt.Errorf("authorization: OSStatus %d", int(st))
-	}
-	return out, nil
+	st := C.cw_obtain(cr, cp, (*C.uchar)(unsafe.Pointer(&out[0])))
+	// out is all zeros when the status is not success: no token is ever
+	// the product of a refusal.
+	return out, statusErr("authorization", int(st))
 }
 
 // Verify asks the system whether the token carries Right, and destroys the
@@ -100,8 +100,5 @@ func EnsureRight() error {
 	defer C.free(unsafe.Pointer(cr))
 	defer C.free(unsafe.Pointer(cu))
 	defer C.free(unsafe.Pointer(cd))
-	if st := C.cw_ensure(cr, cu, cd); st != 0 {
-		return fmt.Errorf("authorization right: OSStatus %d", int(st))
-	}
-	return nil
+	return statusErr("authorization right", int(C.cw_ensure(cr, cu, cd)))
 }

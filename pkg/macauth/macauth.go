@@ -13,7 +13,18 @@
 // Without cgo, or off macOS, every function fails closed.
 package macauth
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
+
+// statusErr is an OSStatus as an error: nil for success (0).
+func statusErr(what string, st int) error {
+	if st == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s: OSStatus %d", what, st)
+}
 
 // Right is the authorization right of our own. The helper creates it in the
 // system policy database (EnsureRight) with the rule authenticate-admin-

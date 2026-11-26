@@ -25,9 +25,7 @@ func DefaultAuthorizer() Authorizer {
 type authServicesAuthorizer struct{}
 
 func (authServicesAuthorizer) Authorize(_ context.Context, a Approval) error {
-	if len(a.Credential) == 0 {
-		return fmt.Errorf("%w: no authorization was given (the app must obtain one from the system first)", ErrDenied)
-	}
+	// An absent credential is refused by Verify like any other bad one.
 	if err := macauth.Verify(a.Credential); err != nil {
 		return fmt.Errorf("%w: %v", ErrDenied, err)
 	}

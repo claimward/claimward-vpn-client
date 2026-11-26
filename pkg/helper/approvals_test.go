@@ -241,3 +241,10 @@ func TestAServerThatDoesNotAnswerIsNotApproved(t *testing.T) {
 		t.Error("the system was asked about a server that could not be read")
 	}
 }
+
+func TestAnApprovalsPathThatIsADirectoryIsAnError(t *testing.T) {
+	a := &approvals{path: t.TempDir()}
+	if _, err := a.list(); err == nil {
+		t.Error("a directory was read as an approvals file")
+	}
+}

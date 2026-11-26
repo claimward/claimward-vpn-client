@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -125,36 +126,33 @@ func (a *approvals) loadLocked() (approvalsFile, error) {
 			return f, fmt.Errorf("%s: %w", a.path, err)
 		}
 	}
-	fh, err := os.Open(a.path)
+	b, err := readLimited(a.path)
+	if err == nil {
+		if err = json.Unmarshal(b, &f); err != nil {
+			err = fmt.Errorf("%s: %w", a.path, err)
+		}
+	}
 	if errors.Is(err, os.ErrNotExist) {
-		return f, nil
+		return approvalsFile{Version: 1}, nil
 	}
 	if err != nil {
-		return f, err
-	}
-	defer fh.Close()
-	dec := json.NewDecoder(&limited{r: fh, n: maxApprovalsBytes})
-	if err := dec.Decode(&f); err != nil {
-		return approvalsFile{Version: 1}, fmt.Errorf("%s: %w", a.path, err)
+		return approvalsFile{Version: 1}, err
 	}
 	return f, nil
 }
 
-type limited struct {
-	r interface{ Read([]byte) (int, error) }
-	n int
-}
-
-func (l *limited) Read(p []byte) (int, error) {
-	if l.n <= 0 {
-		return 0, errors.New("approvals file too large")
+// readLimited reads a file of at most maxApprovalsBytes.
+func readLimited(path string) ([]byte, error) {
+	fh, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
-	if len(p) > l.n {
-		p = p[:l.n]
+	defer fh.Close()
+	b, err := io.ReadAll(io.LimitReader(fh, maxApprovalsBytes+1))
+	if err == nil && len(b) > maxApprovalsBytes {
+		err = errors.New("approvals file too large")
 	}
-	n, err := l.r.Read(p)
-	l.n -= n
-	return n, err
+	return b, err
 }
 
 // Lookup is the approved entry for a canonical URL.
@@ -211,26 +209,19 @@ func (a *approvals) remove(server string) (bool, error) {
 
 // saveLocked writes the file whole beside itself and renames it over: a crash
 // leaves the old file or the new one. It is created 0600 in the directory of
-// the file (root's on Unix, 0600; on Windows the protected directory of the
-// socket, whose ACL the new file inherits).
+// the file (root's on Unix; on Windows the protected directory of the socket,
+// whose ACL the new file inherits).
 func (a *approvals) saveLocked(f approvalsFile) error {
-	dir := filepath.Dir(a.path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
+	// A directory that cannot be made shows as the write below failing.
+	_ = os.MkdirAll(filepath.Dir(a.path), 0o755)
 	b, _ := json.MarshalIndent(f, "", "  ") // plain strings and times: cannot fail
-	tmp, err := os.CreateTemp(dir, ".approved-*")
-	if err != nil {
+	tmp := a.path + ".tmp"
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
+		os.Remove(tmp)
 		return err
 	}
-	name := tmp.Name()
-	_, werr := tmp.Write(append(b, '\n'))
-	if err := errors.Join(werr, tmp.Sync(), tmp.Close()); err != nil {
-		os.Remove(name)
-		return err
-	}
-	if err := os.Rename(name, a.path); err != nil {
-		os.Remove(name)
+	if err := os.Rename(tmp, a.path); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 	return nil

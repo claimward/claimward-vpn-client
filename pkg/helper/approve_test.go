@@ -3,6 +3,9 @@ package helper
 import (
 	"context"
 	"errors"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -243,5 +246,64 @@ func TestTheElevatedSocketNamesNoGroup(t *testing.T) {
 	d := elevatedSocketSDDL()
 	if strings.Count(d, "(A;") != 2 || !strings.Contains(d, ";;;SY)") || !strings.Contains(d, ";;;BA)") || strings.Contains(d, "S-1-") {
 		t.Errorf("the elevated socket's descriptor: %s", d)
+	}
+}
+
+// Tenants of an administrator's server: no bearer is refused before anyone is
+// asked, and a server that does not answer is an error, not an empty list.
+func TestTenantsOfAnAdminServer(t *testing.T) {
+	v := newVPNServer(t)
+	dead := newVPNServer(t)
+	dead.Close()
+	c, _, _ := helperFor(t, v.URL, dead.URL)
+	if _, err := c.Tenants(v.URL, "", ""); err == nil {
+		t.Error("tenants with no bearer")
+	}
+	if ts, err := c.Tenants(v.URL, "", "tok"); err != nil || len(ts.Tenants) != 2 {
+		t.Errorf("tenants: %+v %v", ts, err)
+	}
+	if _, err := c.Tenants(dead.URL, "", "tok"); err == nil {
+		t.Error("tenants of a server that is down")
+	}
+}
+
+// The elevated socket is the client's to name; where a platform has none, it
+// says so.
+func TestApproveElevatedUsesTheSocketItIsGiven(t *testing.T) {
+	v := newVPNServer(t)
+	c, s, _ := helperFor(t)
+	s.UseAuthorizer(AuthorizerFunc(func(_ context.Context, a Approval) error {
+		if a.Elevated {
+			return nil
+		}
+		return ErrDenied
+	}))
+	name := "Chemistry"
+	docName(s, &name)
+	// Through the ordinary socket the approval is not elevated: refused.
+	if _, err := c.Approve(v.URL, nil); !errors.Is(err, helperclient.ErrApprovalDenied) {
+		t.Fatalf("ordinary socket: %v", err)
+	}
+	// Through the socket the client names, served as elevated: accepted.
+	dir, err := os.MkdirTemp("", "cwe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	ln, err := net.Listen("unix", filepath.Join(dir, "e.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go s.ServeElevated(ln)
+	c.ElevatedSocketPath = ln.Addr().String()
+	if _, err := c.ApproveElevated(v.URL); err != nil {
+		t.Errorf("elevated socket: %v", err)
+	}
+	if hproto.DefaultElevatedSocketPath == "" {
+		c.ElevatedSocketPath = ""
+		if _, err := c.ApproveElevated(v.URL); err == nil || !strings.Contains(err.Error(), "no elevated socket") {
+			t.Errorf("no elevated socket: %v", err)
+		}
 	}
 }
