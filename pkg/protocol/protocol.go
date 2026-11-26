@@ -15,7 +15,38 @@ const (
 	PathDeregister = "/api/v1/deregister"
 	PathTenants    = "/api/v1/tenants"
 	PathHealthz    = "/healthz"
+
+	// PathWellKnownConfiguration is the public discovery document (RFC 8615 §3:
+	// a single-segment name under /.well-known/, at the root of the path).
+	PathWellKnownConfiguration = "/.well-known/claimward-configuration"
 )
+
+// ConfigurationVersion is the version of the discovery document's shape.
+const ConfigurationVersion = 1
+
+// Configuration is the public discovery document served, unauthenticated, at
+// PathWellKnownConfiguration. It holds public values only: never a secret.
+//
+// Like RFC 8414 §3.2, a claim without a value is omitted, not sent empty.
+type Configuration struct {
+	// Version is ConfigurationVersion at the time the server was built.
+	Version int `json:"version"`
+	// ServerName is the operator's display name for the server (optional).
+	ServerName string `json:"server_name,omitempty"`
+	// Provider is the sign-in provider: "github", "oidc" or "go-authn".
+	Provider string `json:"provider"`
+	// GitHubClientID is the public client ID of the server's GitHub OAuth app
+	// (provider "github").
+	GitHubClientID string `json:"github_client_id,omitempty"`
+	// OIDCIssuer and OIDCClientID identify the OIDC provider (providers "oidc"
+	// and "go-authn").
+	OIDCIssuer   string `json:"oidc_issuer,omitempty"`
+	OIDCClientID string `json:"oidc_client_id,omitempty"`
+	// Exclusive: this server refuses to share the machine with other Claimward
+	// tunnels. Clients refuse to connect it alongside others, and refuse others
+	// while it is connected.
+	Exclusive bool `json:"exclusive"`
+}
 
 // TenantInfo identifies a tenant the authenticated user may connect to.
 type TenantInfo struct {
