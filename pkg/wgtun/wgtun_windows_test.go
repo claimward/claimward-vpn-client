@@ -115,11 +115,11 @@ func TestTwoServersTwoWintunAdapters(t *testing.T) {
 	}
 	priv, _ := wgtypes.GeneratePrivateKey()
 	peer, _ := wgtypes.GeneratePrivateKey()
-	mk := func(name, addr string) *Tunnel {
+	mk := func(name, addr, route string) *Tunnel {
 		t.Helper()
 		tun, err := Up(Config{
 			PrivateKey: priv, ServerPublicKey: peer.PublicKey(),
-			Endpoint: "192.0.2.1:51820", AllowedIPs: []string{"10.200.0.0/16"},
+			Endpoint: "192.0.2.1:51820", AllowedIPs: []string{route},
 			Address: addr, MTU: 1380, Name: name,
 		})
 		if err != nil {
@@ -127,13 +127,13 @@ func TestTwoServersTwoWintunAdapters(t *testing.T) {
 		}
 		return tun
 	}
-	a := mk("https://a.example.org", "10.201.0.5/32")
+	a := mk("https://a.example.org", "10.201.0.5/32", "10.201.0.0/16")
 	defer a.Close()
-	b := mk("https://b.example.org", "10.202.0.5/32")
+	b := mk("https://b.example.org", "10.202.0.5/32", "10.202.0.0/16")
 	if a.Name() == b.Name() {
 		t.Fatalf("two servers share the adapter %q", a.Name())
 	}
 	b.Close()
-	b = mk("https://b.example.org", "10.202.0.5/32")
+	b = mk("https://b.example.org", "10.202.0.5/32", "10.202.0.0/16")
 	b.Close()
 }

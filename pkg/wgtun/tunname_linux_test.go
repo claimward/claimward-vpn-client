@@ -10,13 +10,15 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
-func linuxTunnel(t *testing.T, name, addr string) *Tunnel {
+// linuxTunnel brings a server's tunnel up; each server routes its own subnet,
+// since two interfaces cannot both carry the same route.
+func linuxTunnel(t *testing.T, name, addr, route string) *Tunnel {
 	t.Helper()
 	priv, _ := wgtypes.GeneratePrivateKey()
 	peer, _ := wgtypes.GeneratePrivateKey()
 	tun, err := Up(Config{
 		PrivateKey: priv, ServerPublicKey: peer.PublicKey(),
-		Endpoint: "192.0.2.1:51820", AllowedIPs: []string{"10.200.0.0/16"},
+		Endpoint: "192.0.2.1:51820", AllowedIPs: []string{route},
 		Address: addr, MTU: 1380, Name: name,
 	})
 	if err != nil {
@@ -37,8 +39,8 @@ func TestLinuxTunnelsPerServer(t *testing.T) {
 	if os.Getenv("CLAIMWARD_TUN_TEST") != "1" {
 		t.Skip("set CLAIMWARD_TUN_TEST=1, as root")
 	}
-	a := linuxTunnel(t, "https://a.example.org", "10.201.0.5/32")
-	b := linuxTunnel(t, "https://b.example.org", "10.202.0.5/32")
+	a := linuxTunnel(t, "https://a.example.org", "10.201.0.5/32", "10.201.0.0/16")
+	b := linuxTunnel(t, "https://b.example.org", "10.202.0.5/32", "10.202.0.0/16")
 	if a.Name() != InterfaceName("https://a.example.org") || b.Name() != InterfaceName("https://b.example.org") {
 		t.Errorf("names %q %q", a.Name(), b.Name())
 	}
@@ -57,8 +59,8 @@ func TestLinuxTunnelsPerServer(t *testing.T) {
 	// A helper that crashed leaves nothing (the kernel frees a TUN with its
 	// process); one that was killed without that, or a device left behind,
 	// is replaced by the next Up of the same server.
-	stale := linuxTunnel(t, "https://c.example.org", "10.203.0.5/32")
-	again := linuxTunnel(t, "https://c.example.org", "10.203.0.5/32")
+	stale := linuxTunnel(t, "https://c.example.org", "10.203.0.5/32", "10.203.0.0/16")
+	again := linuxTunnel(t, "https://c.example.org", "10.203.0.5/32", "10.203.0.0/16")
 	if !exists(again.Name()) {
 		t.Error("the replacement is not there")
 	}
