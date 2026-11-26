@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"version\":2,\"providers\":[{\"id\":\"a\",\"kind\":\"github\",\"name\":\"G\",\"github_client_id\":\"x\"}],\"logo\":{\"path\":\"//evil.example/l.svg\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}}")

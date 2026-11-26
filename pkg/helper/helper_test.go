@@ -79,11 +79,14 @@ func helperFor(t *testing.T, servers ...string) (*helperclient.Client, *Server, 
 	s := New(Config{Servers: servers}, "linux", "app-test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	var ups []wgtun.Config
 	s.up = func(c wgtun.Config) (Tunnel, error) { ups = append(ups, c); return &fakeTunnel{}, nil }
-	s.watch = func(ctx context.Context, ep, bearer, pub string, on func(routeclient.Update)) error {
+	s.watch = func(ctx context.Context, ep, bearer, provider, pub string, on func(routeclient.Update)) error {
 		on(routeclient.Update{AllowedIPs: []string{"10.9.0.0/16"}, Serial: 2})
 		<-ctx.Done()
 		return nil
 	}
+	s.UseDiscovery(func(ctx context.Context, server string) (*protocol.Configuration, error) {
+		return &protocol.Configuration{Version: 2, ServerName: "Test"}, nil
+	})
 	dir, err := os.MkdirTemp("", "cwh")
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +120,7 @@ func TestTheHelperConnectsToItsServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !resp.Connected || resp.AssignedIP != "10.80.0.7/32" || resp.Tenant != "hpc" {
+	if len(resp.Tunnels) != 1 || resp.Tunnels[0].AssignedIP != "10.80.0.7/32" || resp.Tunnels[0].Tenant != "hpc" {
 		t.Errorf("connect: %+v", resp)
 	}
 	if len(v.enroll) != 1 || v.enroll[0].Tenant != "hpc" || v.enroll[0].Device.OS != "linux" || v.enroll[0].Device.Platform != "app-test" {
@@ -127,16 +130,16 @@ func TestTheHelperConnectsToItsServer(t *testing.T) {
 		t.Errorf("the tunnel was brought up with %+v", *ups)
 	}
 	st, err := c.Status()
-	if err != nil || !st.Connected || st.Tenant != "hpc" || st.Interface != "utun9" {
+	if err != nil || len(st.Tunnels) != 1 || st.Tunnels[0].Tenant != "hpc" || st.Tunnels[0].Interface != "utun9" {
 		t.Errorf("status: %+v %v", st, err)
 	}
-	if _, err := c.Down(); err != nil {
+	if _, err := c.Down(v.URL); err != nil {
 		t.Fatal(err)
 	}
-	if st, _ := c.Status(); st.Connected {
+	if st, _ := c.Status(); len(st.Tunnels) != 0 {
 		t.Error("still connected after down")
 	}
-	ts, err := c.Tenants(v.URL, "tok")
+	ts, err := c.Tenants(v.URL, "", "tok")
 	if err != nil || len(ts.Tenants) != 2 || ts.Tenants[1].ID != "hpc" {
 		t.Errorf("tenants: %+v %v", ts, err)
 	}
@@ -151,7 +154,7 @@ func TestTheHelperRefusesWhatItWasNotConfiguredFor(t *testing.T) {
 	if _, err := c.Connect(hproto.ConnectSpec{ServerURL: rogue.URL, Bearer: "tok", PrivateKey: key(t)}); err == nil || !strings.Contains(err.Error(), "not one this helper is configured for") {
 		t.Errorf("a rogue server: %v", err)
 	}
-	if _, err := c.Tenants(rogue.URL, "tok"); err == nil {
+	if _, err := c.Tenants(rogue.URL, "", "tok"); err == nil {
 		t.Error("a rogue server was asked for tenants")
 	}
 	if len(rogue.enroll) != 0 || len(*ups) != 0 {

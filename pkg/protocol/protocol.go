@@ -30,6 +30,24 @@ const (
 	MetadataProvider = "claimward-provider" // gRPC metadata keys are lower case
 )
 
+// ValidProviderID reports whether s can be a Provider.ID: 1 to 64 bytes of
+// ASCII letters, digits, '.', '_', '~' and '-' (url-safe). A client sends the
+// id in a header and keys its stored session by it, so it accepts nothing else.
+func ValidProviderID(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '.', c == '_', c == '~', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // Error codes of a 401 that concerns the provider (ErrorResponse.Error).
 const (
 	ErrMissingProvider = "missing_provider"

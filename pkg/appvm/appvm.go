@@ -27,20 +27,24 @@ import (
 	"time"
 
 	"github.com/claimward/claimward-vpn-client/pkg/appcore"
+	"github.com/claimward/claimward-vpn-client/pkg/exclusive"
 	"github.com/claimward/claimward-vpn-client/pkg/hproto"
 )
 
 // Service is what the view model needs from appcore.Core, which satisfies it.
+// Every command but Status names the server it is about, by URL.
 type Service interface {
 	Status() appcore.Status
-	Config() appcore.Config
-	UpdateConfig(appcore.Config) error
-	Login(ctx context.Context) error
-	Tenants(ctx context.Context) ([]hproto.Tenant, error)
-	SetTenant(id string) error
-	Connect(ctx context.Context) error
-	Disconnect(ctx context.Context) error
-	Logout(ctx context.Context) error
+	AddServer(ctx context.Context, rawURL string) (appcore.ServerEntry, error)
+	RemoveServer(ctx context.Context, server string) error
+	SetProvider(ctx context.Context, server, id string) error
+	Login(ctx context.Context, server, providerID string) error
+	Tenants(ctx context.Context, server string) ([]hproto.Tenant, error)
+	SetTenant(server, id string) error
+	Connect(ctx context.Context, server string) error
+	Disconnect(ctx context.Context, server string) error
+	Logout(ctx context.Context, server string) error
+	Logo(ctx context.Context, server string) []byte
 }
 
 var _ Service = (*appcore.Core)(nil)
@@ -77,29 +81,22 @@ const (
 	ActionsConnected                   // Disconnect, Sign out
 )
 
-// Provider is an identity provider the settings form offers.
-type Provider struct{ ID, Label string }
-
-// Providers are offered in this order.
-var Providers = []Provider{
-	{"github", "GitHub (device flow)"},
-	{"oidc", "OIDC (browser)"},
-	{"go-authn", "go-authn (device flow)"},
+// ProviderOption is one row of the identity-provider choice, as the server's
+// discovery document lists them.
+type ProviderOption struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
 }
 
-// ProviderIndex is the position of provider id in Providers (0 if unknown).
-func ProviderIndex(id string) int {
-	for i, p := range Providers {
-		if p.ID == id {
-			return i
-		}
-	}
-	return 0
+// ServerRow is one server in the list.
+type ServerRow struct {
+	URL       string `json:"url"`
+	Name      string `json:"name"` // the server's own name, or its URL
+	Exclusive bool   `json:"exclusive"`
+	LoggedIn  bool   `json:"logged_in"`
+	Connected bool   `json:"connected"`
+	Selected  bool   `json:"selected"`
 }
-
-// UsesIssuer reports whether provider id is configured with an OIDC issuer
-// and client ID rather than a GitHub client ID.
-func UsesIssuer(id string) bool { return id != "github" && id != "" }
 
 // TenantOption is one row of the tenant choice. The first row always has an
 // empty ID: no tenant chosen, which lets the server use the person's only one.
@@ -108,18 +105,18 @@ type TenantOption struct {
 	Label string `json:"label"`
 }
 
-// Form is the settings form.
+// Form is the settings form: the person types a server's URL and nothing
+// else; the server's own document says the rest.
 type Form struct {
-	ServerURL      string `json:"server_url"`
-	Provider       string `json:"provider"`
-	GitHubClientID string `json:"github_client_id"`
-	OIDCIssuer     string `json:"oidc_issuer"`
-	OIDCClientID   string `json:"oidc_client_id"`
+	ServerURL string `json:"server_url"`
 }
 
 // Can says which commands may run now.
 type Can struct {
 	SignIn         bool `json:"sign_in"`
+	ChooseProvider bool `json:"choose_provider"`
+	RemoveServer   bool `json:"remove_server"`
+	SelectServer   bool `json:"select_server"`
 	CancelSignIn   bool `json:"cancel_sign_in"`
 	OpenSignInPage bool `json:"open_sign_in_page"`
 	ChooseTenant   bool `json:"choose_tenant"`
@@ -139,7 +136,7 @@ type State struct {
 	Address  string  `json:"address"`  // assigned address and interface
 	Tenant   string  `json:"tenant"`   // the session's tenant
 	Helper   string  `json:"helper"`   // whether the privileged helper answers
-	Server   string  `json:"server"`   // the configured server
+	Server   string  `json:"server"`   // the selected server's URL
 	Problem  string  `json:"problem"`  // why the configuration is incomplete
 	Busy     string  `json:"busy"`     // what is in progress, or ""
 	Error    string  `json:"error"`    // the last action's failure or notice, or ""
@@ -155,6 +152,21 @@ type State struct {
 	SignInURL  string `json:"sign_in_url"`
 	SignInCode string `json:"sign_in_code"`
 	SignInHint string `json:"sign_in_hint"`
+
+	// ServerName is the selected server's own name (its URL until its
+	// document has been read), and Servers every server added, in order.
+	ServerName  string      `json:"server_name"`
+	Servers     []ServerRow `json:"servers"`
+	ServerIndex int         `json:"server_index"`
+	// Exclusive: the selected server refuses to share the machine with any
+	// other. HasLogo: Logo returns its picture.
+	Exclusive bool `json:"exclusive"`
+	HasLogo   bool `json:"has_logo"`
+	// ProviderOptions are the identity providers the selected server lists;
+	// NeedsProvider says several are listed and none is chosen yet.
+	ProviderOptions []ProviderOption `json:"provider_options"`
+	ProviderIndex   int              `json:"provider_index"`
+	NeedsProvider   bool             `json:"needs_provider"`
 
 	TenantOptions []TenantOption `json:"tenant_options"`
 	TenantIndex   int            `json:"tenant_index"`
@@ -199,6 +211,7 @@ type Model struct {
 
 	mu           sync.Mutex // guards everything below
 	st           appcore.Status
+	sel          string // the selected server's URL; "" = the first
 	haveStatus   bool
 	settingsOpen bool
 	signingIn    bool
@@ -296,14 +309,51 @@ func (m *Model) setStatusLocked(st appcore.Status) {
 	if !had || m.userDown {
 		return
 	}
-	switch {
-	case prev.LoggedIn && !st.LoggedIn:
-		m.pending = append(m.pending, Event{Kind: EventSessionExpired,
-			Title: "Claimward: signed out", Body: "Your session expired. Sign in again to connect."})
-	case prev.Connected && !st.Connected:
-		m.pending = append(m.pending, Event{Kind: EventDropped,
-			Title: "Claimward: disconnected", Body: "The VPN connection dropped. Open Claimward to connect again."})
+	for _, p := range prev.Servers {
+		for _, s := range st.Servers {
+			if s.URL != p.URL {
+				continue
+			}
+			who := rowName(s)
+			switch {
+			case p.LoggedIn && !s.LoggedIn:
+				m.pending = append(m.pending, Event{Kind: EventSessionExpired,
+					Title: "Claimward: signed out of " + who, Body: "Your session expired. Sign in again to connect."})
+			case p.Connected && !s.Connected:
+				m.pending = append(m.pending, Event{Kind: EventDropped,
+					Title: "Claimward: disconnected from " + who, Body: "The VPN connection dropped. Open Claimward to connect again."})
+			}
+		}
 	}
+}
+
+// rowName is what a server is called: its own name, else its URL.
+func rowName(s appcore.ServerStatus) string {
+	if s.Name != "" {
+		return s.Name
+	}
+	return s.URL
+}
+
+// curLocked is the selected server, or the first if none is selected or the
+// selected one is gone; ok is false when no server was added. The caller
+// holds m.mu.
+func (m *Model) curLocked() (appcore.ServerStatus, bool) {
+	for _, s := range m.st.Servers {
+		if s.URL == m.sel {
+			return s, true
+		}
+	}
+	if len(m.st.Servers) > 0 {
+		return m.st.Servers[0], true
+	}
+	return appcore.ServerStatus{}, false
+}
+
+// needsProvider: the server lists several identity providers and none is
+// chosen, so signing in needs the person's choice.
+func needsProvider(s appcore.ServerStatus) bool {
+	return len(s.Providers) > 1 && s.Provider == ""
 }
 
 // publish hands the current State, then the events it brought, to the
@@ -367,16 +417,20 @@ func (m *Model) Apply(st appcore.Status) {
 // canLocked says which commands may run. The caller holds m.mu.
 func (m *Model) canLocked() Can {
 	st := m.st
+	cur, have := m.curLocked()
 	idle := m.busy == ""
 	settings := m.settingsOpen
 	return Can{
-		SignIn:         idle && st.ConfigOK && !st.LoggedIn,
+		SignIn:         idle && have && st.ConfigOK && !cur.LoggedIn && !needsProvider(cur),
+		ChooseProvider: idle && have && !cur.LoggedIn && len(cur.Providers) > 1,
+		RemoveServer:   idle && have,
+		SelectServer:   idle && len(st.Servers) > 1,
 		CancelSignIn:   m.signingIn,
-		OpenSignInPage: st.DeviceVerificationURI != "",
-		ChooseTenant:   idle && st.LoggedIn && st.HelperInstalled,
-		Connect:        idle && st.LoggedIn && st.HelperInstalled && !st.Connected,
-		Disconnect:     idle && st.Connected,
-		SignOut:        idle && st.LoggedIn,
+		OpenSignInPage: cur.DeviceVerificationURI != "",
+		ChooseTenant:   idle && cur.LoggedIn && st.HelperInstalled,
+		Connect:        idle && cur.LoggedIn && st.HelperInstalled && !cur.Connected,
+		Disconnect:     idle && cur.Connected,
+		SignOut:        idle && cur.LoggedIn,
 		OpenSettings:   idle && !settings,
 		SaveSettings:   idle && settings,
 		CloseSettings:  idle && settings,
@@ -423,18 +477,71 @@ func (m *Model) run(ok func(Can) bool, busy string, pre func(), work func(contex
 
 // SignIn starts the sign-in, whose device-flow prompt appears in State.
 func (m *Model) SignIn() {
+	server := m.curURL()
 	m.run(func(c Can) bool { return c.SignIn }, "Signing in…",
 		func() { m.signingIn = true },
-		m.svc.Login,
+		func(ctx context.Context) error { return m.svc.Login(ctx, server, "") },
 		func(err error) {
 			m.signingIn = false
 			switch {
 			case errors.Is(err, context.Canceled):
 				m.err = "Sign-in cancelled."
+			case errors.Is(err, appcore.ErrProviderRequired):
+				m.err = "Choose an identity provider, then sign in."
 			case err != nil:
 				m.err = "Sign-in failed: " + err.Error()
 			}
 		})
+}
+
+// curURL is the selected server's URL ("" when none was added).
+func (m *Model) curURL() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, _ := m.curLocked()
+	return cur.URL
+}
+
+// SelectServer makes the row i of State.Servers the server the window shows
+// and the commands are about. Other servers are left as they are: a tunnel
+// stays up when another is selected.
+func (m *Model) SelectServer(i int) {
+	m.mu.Lock()
+	if m.canLocked().SelectServer && i >= 0 && i < len(m.st.Servers) {
+		m.sel = m.st.Servers[i].URL
+	}
+	m.mu.Unlock()
+	m.publish()
+}
+
+// SelectProvider chooses the row i of State.ProviderOptions as the selected
+// server's identity provider, for the sign-ins that follow.
+func (m *Model) SelectProvider(i int) {
+	server := m.curURL()
+	var id string
+	m.mu.Lock()
+	cur, _ := m.curLocked()
+	if i >= 0 && i < len(cur.Providers) {
+		id = cur.Providers[i].ID
+	}
+	m.mu.Unlock()
+	if id == "" {
+		m.publish()
+		return
+	}
+	m.run(func(c Can) bool { return c.ChooseProvider }, "Choosing the identity provider…", nil,
+		func(ctx context.Context) error { return m.svc.SetProvider(ctx, server, id) },
+		func(err error) {
+			if err != nil {
+				m.err = "Choosing the identity provider failed: " + err.Error()
+			}
+		})
+}
+
+// Logo is the selected server's logo, an SVG document the library has
+// already checked (same origin, digest, sanitised, size capped), or nil.
+func (m *Model) Logo() []byte {
+	return m.svc.Logo(m.ctx, m.curURL())
 }
 
 // CancelSignIn gives up a sign-in that waits for the person.
@@ -453,7 +560,8 @@ func (m *Model) CancelSignIn() {
 // network, and a URL handed to the system can as well name a program.
 func (m *Model) OpenSignInPage() {
 	m.mu.Lock()
-	raw := m.st.DeviceVerificationURI
+	cur, _ := m.curLocked()
+	raw := cur.DeviceVerificationURI
 	if raw == "" {
 		m.mu.Unlock()
 		return
@@ -472,9 +580,10 @@ func (m *Model) OpenSignInPage() {
 // appear in State.TenantOptions.
 func (m *Model) ChooseTenant() {
 	var n int
+	server := m.curURL()
 	m.run(func(c Can) bool { return c.ChooseTenant }, "Asking the server for your tenants…", nil,
 		func(ctx context.Context) error {
-			ts, err := m.svc.Tenants(ctx)
+			ts, err := m.svc.Tenants(ctx, server)
 			n = len(ts)
 			return err
 		},
@@ -492,20 +601,28 @@ func (m *Model) ChooseTenant() {
 
 // Connect brings the tunnel up.
 func (m *Model) Connect() {
-	m.run(func(c Can) bool { return c.Connect }, "Connecting…", nil, m.svc.Connect,
+	server := m.curURL()
+	m.run(func(c Can) bool { return c.Connect }, "Connecting…", nil,
+		func(ctx context.Context) error { return m.svc.Connect(ctx, server) },
 		func(err error) {
+			var xerr *exclusive.Error
 			switch {
 			case errors.Is(err, appcore.ErrTenantRequired):
 				m.err = "You belong to several tenants: choose one, then connect again."
+			case errors.As(err, &xerr):
+				// The refusal names the server in the way.
+				m.err = "Not connected: " + xerr.Error()
 			case err != nil:
 				m.err = "Connection failed: " + err.Error()
 			}
 		})
 }
 
-// Disconnect takes the tunnel down.
+// Disconnect takes the selected server's tunnel down; the others stay up.
 func (m *Model) Disconnect() {
-	m.run(func(c Can) bool { return c.Disconnect }, "Disconnecting…", func() { m.userDown = true }, m.svc.Disconnect,
+	server := m.curURL()
+	m.run(func(c Can) bool { return c.Disconnect }, "Disconnecting…", func() { m.userDown = true },
+		func(ctx context.Context) error { return m.svc.Disconnect(ctx, server) },
 		func(err error) {
 			if err != nil {
 				m.err = "Disconnecting failed: " + err.Error()
@@ -513,12 +630,29 @@ func (m *Model) Disconnect() {
 		})
 }
 
-// SignOut forgets the session.
+// SignOut forgets the session at the selected server.
 func (m *Model) SignOut() {
-	m.run(func(c Can) bool { return c.SignOut }, "Signing out…", func() { m.userDown = true }, m.svc.Logout,
+	server := m.curURL()
+	m.run(func(c Can) bool { return c.SignOut }, "Signing out…", func() { m.userDown = true },
+		func(ctx context.Context) error { return m.svc.Logout(ctx, server) },
 		func(err error) {
 			if err != nil {
 				m.err = "Signing out failed: " + err.Error()
+			}
+		})
+}
+
+// RemoveServer takes the selected server out of the list: its tunnel is
+// brought down and its sessions forgotten.
+func (m *Model) RemoveServer() {
+	server := m.curURL()
+	m.run(func(c Can) bool { return c.RemoveServer }, "Removing the server…", func() { m.userDown = true },
+		func(ctx context.Context) error { return m.svc.RemoveServer(ctx, server) },
+		func(err error) {
+			if err != nil {
+				m.err = "Removing the server failed: " + err.Error()
+			} else if m.sel == server {
+				m.sel = ""
 			}
 		})
 }
@@ -530,25 +664,30 @@ func (m *Model) SignOut() {
 // the failure in State.Error.
 func (m *Model) SelectTenant(i int) {
 	m.mu.Lock()
+	cur, _ := m.curLocked()
 	id, found := "", false
 	for j, o := range m.optionsLocked() {
 		if j == i {
 			id, found = o.ID, true
 		}
 	}
-	if !found || m.st.Connected || m.busy != "" || id == m.st.Tenant {
+	if !found || cur.Connected || m.busy != "" || id == cur.Tenant {
 		m.mu.Unlock()
 		m.publish() // a view that moved its selection is put back
 		return
 	}
 	m.mu.Unlock()
-	err := m.svc.SetTenant(id)
+	err := m.svc.SetTenant(cur.URL, id)
 	m.mu.Lock()
 	if err != nil {
 		m.err = "Choosing the tenant failed: " + err.Error()
 	} else {
 		m.err = ""
-		m.st.Tenant = id
+		for k := range m.st.Servers {
+			if m.st.Servers[k].URL == cur.URL {
+				m.st.Servers[k].Tenant = id
+			}
+		}
 	}
 	m.mu.Unlock()
 	m.publish()
@@ -556,7 +695,6 @@ func (m *Model) SelectTenant(i int) {
 
 // OpenSettings shows the settings form and returns what to fill it with.
 func (m *Model) OpenSettings() (Form, bool) {
-	c := m.svc.Config()
 	m.mu.Lock()
 	if !m.canLocked().OpenSettings {
 		m.mu.Unlock()
@@ -566,47 +704,40 @@ func (m *Model) OpenSettings() (Form, bool) {
 	m.settingsErr = ""
 	m.mu.Unlock()
 	m.publish()
-	return Form{
-		ServerURL: c.ServerURL, Provider: Providers[ProviderIndex(c.Provider)].ID,
-		GitHubClientID: c.GitHubClientID, OIDCIssuer: c.OIDCIssuer, OIDCClientID: c.OIDCClientID,
-	}, true
+	return Form{}, true
 }
 
-// SaveSettings saves the form. An incomplete configuration is saved all the
-// same, since the person may be filling it in over two sittings, and
-// State.Error says what it lacks; a server URL that is no http(s) URL is
-// refused.
+// SaveSettings adds the server whose URL the form holds and selects it. The
+// server must answer with its discovery document: a URL that is no server's
+// is refused, with the reason in State.SettingsError, and the form stays
+// open. A URL that is no https URL (http only for a loopback address) is
+// refused before the network is asked.
 func (m *Model) SaveSettings(f Form) {
-	c := m.svc.Config()
-	c.ServerURL = strings.TrimSpace(f.ServerURL)
-	c.Provider = Providers[ProviderIndex(f.Provider)].ID
-	c.GitHubClientID = strings.TrimSpace(f.GitHubClientID)
-	c.OIDCIssuer = strings.TrimSpace(f.OIDCIssuer)
-	c.OIDCClientID = strings.TrimSpace(f.OIDCClientID)
-	if c.ServerURL != "" {
-		if u, err := url.Parse(c.ServerURL); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-			m.mu.Lock()
-			ok := m.canLocked().SaveSettings
-			if ok {
-				m.settingsErr = "The server URL must be an http(s) URL, such as https://vpn.example.org."
-			}
-			m.mu.Unlock()
-			m.publish()
-			return
+	raw := strings.TrimSpace(f.ServerURL)
+	if u, err := url.Parse(raw); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		m.mu.Lock()
+		ok := m.canLocked().SaveSettings
+		if ok {
+			m.settingsErr = "The server URL must be an https URL, such as https://vpn.example.org."
 		}
+		m.mu.Unlock()
+		m.publish()
+		return
 	}
-	m.run(func(c Can) bool { return c.SaveSettings }, "Saving the configuration…",
+	var added appcore.ServerEntry
+	m.run(func(c Can) bool { return c.SaveSettings }, "Reading the server's configuration…",
 		func() { m.settingsErr = "" },
-		func(context.Context) error { return m.svc.UpdateConfig(c) },
+		func(ctx context.Context) (err error) {
+			added, err = m.svc.AddServer(ctx, raw)
+			return err
+		},
 		func(err error) {
 			if err != nil {
-				m.settingsErr = "Saving failed: " + err.Error()
+				m.settingsErr = "Adding the server failed: " + err.Error()
 				return
 			}
 			m.settingsOpen = false
-			if err := c.Validate(); err != nil {
-				m.err = "Saved, but not complete: " + err.Error()
-			}
+			m.sel = added.URL
 		})
 }
 
@@ -625,12 +756,13 @@ func (m *Model) CloseSettings() {
 }
 
 func (m *Model) optionsLocked() []TenantOption {
+	cur, _ := m.curLocked()
 	first := "No tenant chosen"
-	if m.st.TenantRequired {
+	if cur.TenantRequired {
 		first = "Choose a tenant…"
 	}
 	opts := []TenantOption{{Label: first}}
-	for _, t := range m.st.Tenants {
+	for _, t := range cur.Tenants {
 		opts = append(opts, TenantOption{ID: t.ID, Label: tenantName(t)})
 	}
 	return opts
@@ -638,22 +770,45 @@ func (m *Model) optionsLocked() []TenantOption {
 
 // snapshot builds the State. The caller holds m.mu.
 func (m *Model) snapshot() State {
-	st := m.st
+	g := m.st
+	st, have := m.curLocked()
+	// No server added is the one way the configuration is incomplete now.
+	configured := g.ConfigOK && have
+	problem := g.ConfigError
+	if g.ConfigOK && !have {
+		problem = "No server yet: add one by typing its URL."
+	}
 	s := State{
-		Server: st.ServerURL, Problem: st.ConfigError, Busy: m.busy, Error: m.err,
-		Connected: st.Connected, LoggedIn: st.LoggedIn,
+		Server: st.URL, ServerName: rowName(st), Problem: problem, Busy: m.busy, Error: m.err,
+		Connected: st.Connected, LoggedIn: st.LoggedIn, Exclusive: st.Exclusive, HasLogo: st.HasLogo,
 		SigningIn: m.signingIn, SignInURL: st.DeviceVerificationURI, SignInCode: st.DeviceUserCode,
 		SettingsError: m.settingsErr, ConfigPath: m.configPath,
-		TenantLocked: st.Connected || m.busy != "",
-		Can:          m.canLocked(),
-		Log:          append([]string(nil), st.Log...),
+		TenantLocked:  st.Connected || m.busy != "",
+		Can:           m.canLocked(),
+		Log:           append([]string(nil), g.Log...),
+		NeedsProvider: needsProvider(st),
+		Servers:       []ServerRow{},
+	}
+	for i, r := range g.Servers {
+		row := ServerRow{URL: r.URL, Name: rowName(r), Exclusive: r.Exclusive, LoggedIn: r.LoggedIn, Connected: r.Connected, Selected: r.URL == st.URL}
+		if row.Selected {
+			s.ServerIndex = i
+		}
+		s.Servers = append(s.Servers, row)
+	}
+	s.ProviderOptions = []ProviderOption{}
+	for i, p := range st.Providers {
+		s.ProviderOptions = append(s.ProviderOptions, ProviderOption{ID: p.ID, Label: p.Name})
+		if p.ID == st.Provider {
+			s.ProviderIndex = i
+		}
 	}
 	switch {
 	case m.settingsOpen:
 		s.Screen = ScreenSettings
 	case !m.haveStatus:
 		s.Screen = ScreenLoading
-	case !st.ConfigOK:
+	case !configured:
 		s.Screen = ScreenUnconfigured
 	default:
 		s.Screen = ScreenMain
@@ -662,17 +817,20 @@ func (m *Model) snapshot() State {
 	switch {
 	case !m.haveStatus:
 		s.Headline, s.TrayText = "Starting…", "Claimward: starting…"
-	case !st.ConfigOK:
+	case !configured:
 		s.Headline, s.TrayText = "Not configured", "Claimward: not configured"
 	case st.Connected:
 		s.Headline, s.TrayText = "Connected", "Claimward: connected"
 		if st.AssignedIP != "" {
 			s.TrayText += " (" + st.AssignedIP + ")"
 		}
+		if n := connectedCount(g); n > 1 {
+			s.TrayText = fmt.Sprintf("Claimward: connected to %d servers", n)
+		}
 	case st.LoggedIn:
 		s.Headline = "Disconnected"
 		s.TrayText = "Claimward: disconnected"
-		if !st.HelperInstalled {
+		if !g.HelperInstalled {
 			s.TrayText = "Claimward: helper not running"
 		}
 	default:
@@ -699,7 +857,7 @@ func (m *Model) snapshot() State {
 	} else {
 		s.Address = "Not connected"
 	}
-	if st.HelperInstalled {
+	if g.HelperInstalled {
 		s.Helper = "Privileged helper: running"
 	} else {
 		s.Helper = "Privileged helper: not running (see the README)"
@@ -750,6 +908,16 @@ func (m *Model) snapshot() State {
 		s.Tenant = "Tenant: " + tenantLabel(st.Tenant, st.Tenants)
 	}
 	return s
+}
+
+func connectedCount(g appcore.Status) int {
+	n := 0
+	for _, r := range g.Servers {
+		if r.Connected {
+			n++
+		}
+	}
+	return n
 }
 
 func tenantLabel(id string, offered []hproto.Tenant) string {

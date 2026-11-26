@@ -1,5 +1,5 @@
 // Package helper is the privileged side of a Claimward app: the process that
-// runs as root (or SYSTEM), owns the tunnel, and does the server comms --
+// runs as root (or SYSTEM), owns the tunnels, and does the server comms --
 // shared by the macOS, Linux and Windows apps, each of which only supplies a
 // main that listens.
 //
@@ -12,6 +12,9 @@
 //     peer of its choosing: every packet of the machine, sent there.
 //   - It takes no tunnel configuration from the request at all; the tunnel
 //     is what that server answered.
+//   - It holds one tunnel per server, and applies the exclusivity rule
+//     (pkg/exclusive) itself, from the discovery document it fetched: it does
+//     not take the app's word for whether a server is exclusive.
 //   - Its socket is 0660, for root and one group (listen_unix.go); the
 //     previous helper's was 0666.
 package helper
@@ -23,14 +26,17 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
-	"strings"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/claimward/claimward-vpn-client/pkg/client"
+	"github.com/claimward/claimward-vpn-client/pkg/discovery"
+	"github.com/claimward/claimward-vpn-client/pkg/exclusive"
 	"github.com/claimward/claimward-vpn-client/pkg/hproto"
 	"github.com/claimward/claimward-vpn-client/pkg/protocol"
 	"github.com/claimward/claimward-vpn-client/pkg/routeclient"
@@ -97,7 +103,8 @@ type Server struct {
 	os, platform  string
 	log           *slog.Logger
 	up            func(wgtun.Config) (Tunnel, error)
-	watch         func(ctx context.Context, endpoint, bearer, publicKey string, onUpdate func(routeclient.Update)) error
+	watch         func(ctx context.Context, endpoint, bearer, provider, publicKey string, onUpdate func(routeclient.Update)) error
+	discover      func(ctx context.Context, server string) (*protocol.Configuration, error)
 	enrollTimeout time.Duration
 	// renewAfter is how long after a renewal the next one is due, from the
 	// time the lease has left (renewDelay).
@@ -107,12 +114,15 @@ type Server struct {
 	retryAfter time.Duration
 
 	mu sync.Mutex
-	// sess is the enrollment behind the live tunnel; nil when down.
-	sess *session
-	// gen counts the sessions: a renewal that finds a newer one acts on
-	// nothing.
-	gen     uint64
-	lastErr string
+	// sessions are the enrollments behind the live tunnels, by canonical
+	// server URL; a server with no tunnel has none.
+	sessions map[string]*session
+	// gen counts the sessions: a renewal whose session is no longer the
+	// server's live one acts on nothing.
+	gen uint64
+	// lastErrs is, per server, why its tunnel was last lost or its renewal
+	// last failed.
+	lastErrs map[string]string
 }
 
 // superseded is a re-enrollment that found a newer session, or none.
@@ -120,8 +130,10 @@ const superseded = "superseded"
 
 // session is one enrollment and the tunnel brought up from it.
 type session struct {
-	gen      uint64
-	server   string
+	gen    uint64
+	server string
+	// member is the server as discovery described it when it was connected.
+	member   exclusive.Member
 	spec     hproto.ConnectSpec // Bearer is replaced by ActionRenew
 	pub      wgtypes.Key
 	tun      Tunnel
@@ -152,6 +164,7 @@ func RenewDelay(remaining time.Duration) time.Duration { return renewDelay(remai
 // New is a helper for the platform os ("darwin", "linux", "windows") and app
 // ("app-osx", ...), as the server's admin sees the device.
 func New(cfg Config, os, platform string, log *slog.Logger) *Server {
+	disc := discovery.New(nil)
 	return &Server{
 		cfg: cfg, os: os, platform: platform, log: log,
 		up: func(c wgtun.Config) (Tunnel, error) {
@@ -162,9 +175,12 @@ func New(cfg Config, os, platform string, log *slog.Logger) *Server {
 			return t, nil
 		},
 		watch:         routeclient.Watch,
+		discover:      disc.Get,
 		enrollTimeout: 30 * time.Second,
 		renewAfter:    renewDelay,
 		retryAfter:    time.Minute,
+		sessions:      map[string]*session{},
+		lastErrs:      map[string]string{},
 	}
 }
 
@@ -174,8 +190,14 @@ func (s *Server) UseTunnels(up func(wgtun.Config) (Tunnel, error)) { s.up = up }
 
 // UseRouteWatch replaces how route pushes are watched (routeclient.Watch by
 // default).
-func (s *Server) UseRouteWatch(w func(ctx context.Context, endpoint, bearer, publicKey string, onUpdate func(routeclient.Update)) error) {
+func (s *Server) UseRouteWatch(w func(ctx context.Context, endpoint, bearer, provider, publicKey string, onUpdate func(routeclient.Update)) error) {
 	s.watch = w
+}
+
+// UseDiscovery replaces how a server's discovery document is read
+// (discovery.Client.Get by default): for tests.
+func (s *Server) UseDiscovery(d func(ctx context.Context, server string) (*protocol.Configuration, error)) {
+	s.discover = d
 }
 
 // Serve answers connections until ln is closed.
@@ -226,7 +248,7 @@ func (s *Server) handle(conn net.Conn) {
 	case hproto.ActionRenew:
 		reply(conn, s.renewNow(req.Connect))
 	case hproto.ActionDown:
-		reply(conn, s.down())
+		reply(conn, s.down(req.Connect))
 	case hproto.ActionStatus:
 		reply(conn, s.status())
 	default:
@@ -234,18 +256,30 @@ func (s *Server) handle(conn net.Conn) {
 	}
 }
 
-// allowed is the server URL as configured, if spec names one.
+// allowedServer is the canonical URL of the configured server rawURL names.
+func (s *Server) allowedServer(rawURL string) (string, error) {
+	want, err := secureurl.Canonical(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("server %q: %w", rawURL, err)
+	}
+	for _, u := range s.cfg.Servers {
+		if c, err := secureurl.Canonical(u); err == nil && c == want {
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("server %q is not one this helper is configured for", rawURL)
+}
+
+// allowed is the canonical server URL spec names, if the helper's
+// configuration allows it and spec carries a bearer and a valid provider.
 func (s *Server) allowed(spec *hproto.ConnectSpec) (string, error) {
 	if spec == nil || spec.Bearer == "" {
 		return "", errors.New("missing connect spec")
 	}
-	want := strings.TrimRight(spec.ServerURL, "/")
-	for _, u := range s.cfg.Servers {
-		if strings.TrimRight(u, "/") == want {
-			return u, nil
-		}
+	if spec.Provider != "" && !protocol.ValidProviderID(spec.Provider) {
+		return "", errors.New("invalid provider id")
 	}
-	return "", fmt.Errorf("server %q is not one this helper is configured for", spec.ServerURL)
+	return s.allowedServer(spec.ServerURL)
 }
 
 func (s *Server) tenants(spec *hproto.ConnectSpec) hproto.Response {
@@ -255,7 +289,7 @@ func (s *Server) tenants(spec *hproto.ConnectSpec) hproto.Response {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.enrollTimeout)
 	defer cancel()
-	ts, err := client.New(server).Tenants(ctx, spec.Bearer)
+	ts, err := client.New(server).WithProvider(spec.Provider).Tenants(ctx, spec.Bearer)
 	if err != nil {
 		return hproto.Response{Error: "tenants: " + err.Error()}
 	}
@@ -267,14 +301,30 @@ func (s *Server) tenants(spec *hproto.ConnectSpec) hproto.Response {
 }
 
 func (s *Server) connect(spec *hproto.ConnectSpec) hproto.Response {
-	return s.enroll(spec, 0)
+	return s.enroll(spec, 0, nil)
+}
+
+// membersLocked are the servers with a live tunnel.
+func (s *Server) membersLocked() []exclusive.Member {
+	out := make([]exclusive.Member, 0, len(s.sessions))
+	for _, sess := range s.sessions {
+		out = append(out, sess.member)
+	}
+	return out
+}
+
+// refusal is the response to a connection the exclusivity rule refuses.
+func refusal(err *exclusive.Error) hproto.Response {
+	return hproto.Response{Error: err.Error(), ErrorCode: hproto.ErrExclusive, BlockedBy: err.BlockedBy()}
 }
 
 // enroll enrolls with the server spec names, brings the tunnel up from its
 // answer and starts renewing the lease. A non-zero gen is a re-enrollment
-// by that session's renewal loop, which gives way to anything that happened
-// since (a disconnect, another connect).
-func (s *Server) enroll(spec *hproto.ConnectSpec, gen uint64) hproto.Response {
+// by that session's renewal loop (member is then the session's own), which
+// gives way to anything that happened since (a disconnect, another connect).
+// A first connection (gen 0) reads the server's discovery document and is
+// refused if the server, or one already connected, is exclusive.
+func (s *Server) enroll(spec *hproto.ConnectSpec, gen uint64, member *exclusive.Member) hproto.Response {
 	server, err := s.allowed(spec)
 	if err != nil {
 		return hproto.Response{Error: err.Error()}
@@ -285,7 +335,31 @@ func (s *Server) enroll(spec *hproto.ConnectSpec, gen uint64) hproto.Response {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.enrollTimeout)
 	defer cancel()
-	resp, err := client.New(server).Enroll(ctx, spec.Bearer, pair.Public, protocol.DeviceInfo{
+
+	if member == nil {
+		cfg, err := s.discover(ctx, server)
+		if cfg == nil { // a resolver that answered nothing is no answer
+			cfg = &protocol.Configuration{}
+			if err == nil {
+				err = errors.New("empty answer")
+			}
+		}
+		if err != nil {
+			// Fail closed: without the document the helper cannot tell whether
+			// the server is exclusive.
+			return hproto.Response{Error: "discovery: " + err.Error(), ErrorCode: hproto.ErrDiscovery}
+		}
+		member = &exclusive.Member{URL: server, Name: cfg.ServerName, Exclusive: cfg.Exclusive}
+		s.mu.Lock()
+		err = exclusive.Check(*member, s.membersLocked())
+		s.mu.Unlock()
+		if ex := (*exclusive.Error)(nil); errors.As(err, &ex) {
+			return refusal(ex) // before anything is asked of the server
+		}
+	}
+
+	c := client.New(server).WithProvider(spec.Provider)
+	resp, err := c.Enroll(ctx, spec.Bearer, pair.Public, protocol.DeviceInfo{
 		Name: spec.DeviceName, OS: s.os, Platform: s.platform,
 	}, spec.Tenant)
 	if err != nil {
@@ -297,44 +371,58 @@ func (s *Server) enroll(spec *hproto.ConnectSpec, gen uint64) hproto.Response {
 	}
 
 	s.mu.Lock()
-	if gen != 0 && s.gen != gen {
+	cur := s.sessions[server]
+	if gen != 0 && (cur == nil || cur.gen != gen) {
 		// Disconnected, or connected again, while this re-enrolled. The
 		// enrollment just made is given back -- unless the live session is
 		// that same key at that same server, which another re-enrollment
 		// raced this one to: giving it back would cut the live tunnel.
-		cur := s.sess
 		s.mu.Unlock()
-		if cur == nil || cur.server != server || cur.pub != pair.Public {
+		if cur == nil || cur.pub != pair.Public {
 			s.deregister(&session{server: server, spec: *spec, pub: pair.Public})
 		}
 		return hproto.Response{Error: superseded}
 	}
-	old := s.stopLocked()
-	if old != nil && (old.server != server || old.pub != pair.Public) {
+	if gen == 0 {
+		// The authoritative check: another connection may have been made
+		// since the first one.
+		if err := exclusive.Check(*member, s.membersLocked()); err != nil {
+			s.mu.Unlock()
+			s.deregister(&session{server: server, spec: *spec, pub: pair.Public})
+			var ex *exclusive.Error
+			if errors.As(err, &ex) {
+				return refusal(ex)
+			}
+			return hproto.Response{Error: err.Error()}
+		}
+	}
+	old := s.stopLocked(server)
+	if old != nil && old.pub != pair.Public {
 		// The previous enrollment is somebody else's lease now: give it back.
 		go s.deregister(old)
 	}
 	tun, err := s.up(cfg)
 	if err != nil {
-		s.lastErr = err.Error()
+		s.lastErrs[server] = err.Error()
 		s.mu.Unlock()
 		return hproto.Response{Error: err.Error()}
 	}
 	s.gen++
 	sctx, scancel := context.WithCancel(context.Background())
 	sess := &session{
-		gen: s.gen, server: server, spec: *spec, pub: pair.Public,
+		gen: s.gen, server: server, member: *member, spec: *spec, pub: pair.Public,
 		tun: tun, assigned: resp.AssignedIP, wake: make(chan struct{}, 1), cancel: scancel,
 	}
 	s.setLeaseLocked(sess, resp.LeaseExpiresAt)
-	s.sess, s.lastErr = sess, ""
+	s.sessions[server] = sess
+	delete(s.lastErrs, server)
 	s.mu.Unlock()
 
 	go s.renewLoop(sctx, sess)
 	if resp.GRPCEndpoint != "" {
 		go s.watchRoutes(sctx, sess, resp.GRPCEndpoint)
 	}
-	s.log.Info("connected", "interface", tun.Name(), "assigned", resp.AssignedIP, "tenant", spec.Tenant, "routes", resp.AllowedIPs, "lease", resp.LeaseExpiresAt)
+	s.log.Info("connected", "server", server, "interface", tun.Name(), "assigned", resp.AssignedIP, "tenant", spec.Tenant, "routes", resp.AllowedIPs, "lease", resp.LeaseExpiresAt)
 	return s.status()
 }
 
@@ -342,18 +430,18 @@ func (s *Server) watchRoutes(ctx context.Context, sess *session, endpoint string
 	s.mu.Lock()
 	bearer := sess.spec.Bearer
 	s.mu.Unlock()
-	err := s.watch(ctx, endpoint, bearer, sess.pub.String(), func(u routeclient.Update) {
+	err := s.watch(ctx, endpoint, bearer, sess.spec.Provider, sess.pub.String(), func(u routeclient.Update) {
 		if ctx.Err() != nil {
 			return // the tunnel is going down
 		}
 		if e := sess.tun.UpdateRoutes(u.AllowedIPs); e != nil {
-			s.log.Error("apply pushed routes", "err", e)
+			s.log.Error("apply pushed routes", "server", sess.server, "err", e)
 		} else {
-			s.log.Info("routes updated", "serial", u.Serial, "allowed_ips", u.AllowedIPs)
+			s.log.Info("routes updated", "server", sess.server, "serial", u.Serial, "allowed_ips", u.AllowedIPs)
 		}
 	})
 	if err != nil && ctx.Err() == nil {
-		s.log.Warn("route watch ended", "err", err)
+		s.log.Warn("route watch ended", "server", sess.server, "err", err)
 	}
 }
 
@@ -407,7 +495,7 @@ func (s *Server) renew(ctx context.Context, sess *session) bool {
 	bearer := sess.spec.Bearer
 	s.mu.Unlock()
 	hctx, cancel := context.WithTimeout(ctx, s.enrollTimeout)
-	resp, err := client.New(sess.server).Heartbeat(hctx, bearer, sess.pub)
+	resp, err := client.New(sess.server).WithProvider(sess.spec.Provider).Heartbeat(hctx, bearer, sess.pub)
 	cancel()
 	if ctx.Err() != nil {
 		return false
@@ -417,22 +505,23 @@ func (s *Server) renew(ctx context.Context, sess *session) bool {
 	case err == nil:
 		s.mu.Lock()
 		s.setLeaseLocked(sess, resp.LeaseExpiresAt)
-		if s.sess == sess {
-			s.lastErr = ""
+		if s.sessions[sess.server] == sess {
+			delete(s.lastErrs, sess.server)
 		}
 		s.mu.Unlock()
-		s.log.Info("lease renewed", "until", resp.LeaseExpiresAt)
+		s.log.Info("lease renewed", "server", sess.server, "until", resp.LeaseExpiresAt)
 		return true
 
 	case errors.As(err, &se) && se.Status == http.StatusNotFound:
 		// The server no longer knows the peer: its lease ran out, or the
 		// server restarted (it keeps leases in memory). Enroll again, with
 		// the same key and tenant; failing that the tunnel leads nowhere.
-		s.log.Warn("the server forgot this device; enrolling again", "err", err)
+		s.log.Warn("the server forgot this device; enrolling again", "server", sess.server, "err", err)
 		s.mu.Lock()
 		spec := sess.spec
+		member := sess.member
 		s.mu.Unlock()
-		if r := s.enroll(&spec, sess.gen); !r.OK && r.Error != superseded {
+		if r := s.enroll(&spec, sess.gen, &member); !r.OK && r.Error != superseded {
 			s.drop(sess, "re-enrollment failed: "+r.Error)
 		}
 		return false
@@ -447,39 +536,43 @@ func (s *Server) renew(ctx context.Context, sess *session) bool {
 		// Unreachable, a 5xx, or a bearer that expired (401): retry, sooner
 		// than the lease ends.
 		s.mu.Lock()
-		s.lastErr = "renewal failed: " + err.Error()
+		s.lastErrs[sess.server] = "renewal failed: " + err.Error()
 		left := time.Until(sess.lease)
 		if sess.lease.IsZero() {
 			left = s.retryAfter * 2
 		}
 		sess.renewBy = time.Now().Add(min(s.retryAfter, max(left/2, time.Second)))
 		s.mu.Unlock()
-		s.log.Warn("lease renewal failed; retrying", "err", err)
+		s.log.Warn("lease renewal failed; retrying", "server", sess.server, "err", err)
 		return true
 	}
 }
 
-// drop takes sess's tunnel down, if it is still the live one, because the
-// server no longer carries it.
+// drop takes sess's tunnel down, if it is still its server's live one,
+// because the server no longer carries it.
 func (s *Server) drop(sess *session, why string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.sess != sess {
+	if s.sessions[sess.server] != sess {
 		return
 	}
-	s.stopLocked()
-	s.lastErr = why
-	s.log.Error("tunnel taken down", "why", why)
+	s.stopLocked(sess.server)
+	s.lastErrs[sess.server] = why
+	s.log.Error("tunnel taken down", "server", sess.server, "why", why)
 }
 
-// renewNow is ActionRenew: a fresh bearer for the live session, and a
-// renewal with it now.
+// renewNow is ActionRenew: a fresh bearer for the live session of the server
+// spec names, and a renewal with it now.
 func (s *Server) renewNow(spec *hproto.ConnectSpec) hproto.Response {
 	if spec == nil || spec.Bearer == "" {
 		return hproto.Response{Error: "missing bearer"}
 	}
+	server, err := secureurl.Canonical(spec.ServerURL)
+	if err != nil {
+		return hproto.Response{Error: "server: " + err.Error()}
+	}
 	s.mu.Lock()
-	sess := s.sess
+	sess := s.sessions[server]
 	if sess == nil {
 		s.mu.Unlock()
 		return hproto.Response{Error: "not connected"}
@@ -488,23 +581,39 @@ func (s *Server) renewNow(spec *hproto.ConnectSpec) hproto.Response {
 	s.mu.Unlock()
 	s.renew(context.Background(), sess)
 	// Whatever renew did -- renewed, retried, re-enrolled, dropped -- the
-	// status says where that left the tunnel, and LastError why not.
+	// status says where that left the tunnel, and LastErrors why not.
 	st := s.status()
-	if st.LastError != "" {
-		st.OK, st.Error = false, st.LastError
+	if e := st.LastErrors[server]; e != "" {
+		st.OK, st.Error = false, e
 	}
 	return st
 }
 
-func (s *Server) down() hproto.Response {
+// down is ActionDown: one server's tunnel, or all of them when none is named.
+func (s *Server) down(spec *hproto.ConnectSpec) hproto.Response {
+	var olds []*session
 	s.mu.Lock()
-	old := s.stopLocked()
-	s.lastErr = ""
+	if spec == nil || spec.ServerURL == "" {
+		for _, server := range slices.Sorted(maps.Keys(s.sessions)) {
+			olds = append(olds, s.stopLocked(server))
+		}
+		clear(s.lastErrs)
+	} else {
+		server, err := secureurl.Canonical(spec.ServerURL)
+		if err != nil {
+			s.mu.Unlock()
+			return hproto.Response{Error: "server: " + err.Error()}
+		}
+		if old := s.stopLocked(server); old != nil {
+			olds = append(olds, old)
+		}
+		delete(s.lastErrs, server)
+	}
 	s.mu.Unlock()
-	if old != nil {
+	for _, old := range olds {
 		s.deregister(old)
 	}
-	return hproto.Response{OK: true}
+	return s.status()
 }
 
 // deregister gives the peer's address back to the server, rather than leave
@@ -513,46 +622,56 @@ func (s *Server) down() hproto.Response {
 func (s *Server) deregister(sess *session) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := client.New(sess.server).Deregister(ctx, sess.spec.Bearer, sess.pub); err != nil {
-		s.log.Warn("deregister", "err", err)
+	if err := client.New(sess.server).WithProvider(sess.spec.Provider).Deregister(ctx, sess.spec.Bearer, sess.pub); err != nil {
+		s.log.Warn("deregister", "server", sess.server, "err", err)
 	}
 }
 
-// stopLocked takes the tunnel down and returns the session it belonged to.
-func (s *Server) stopLocked() *session {
-	old := s.sess
+// stopLocked takes a server's tunnel down and returns the session it belonged
+// to (nil when it had none).
+func (s *Server) stopLocked(server string) *session {
+	old := s.sessions[server]
 	if old == nil {
 		return nil
 	}
 	old.cancel()
 	_ = old.tun.Close()
-	s.sess = nil
-	s.gen++
-	s.log.Info("tunnel down")
+	delete(s.sessions, server)
+	s.log.Info("tunnel down", "server", server)
 	return old
 }
 
 func (s *Server) status() hproto.Response {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	resp := hproto.Response{OK: true, Connected: s.sess != nil, LastError: s.lastErr}
-	if sess := s.sess; sess != nil {
-		resp.Interface, resp.AssignedIP, resp.Tenant = sess.tun.Name(), sess.assigned, sess.spec.Tenant
+	resp := hproto.Response{OK: true}
+	for _, server := range slices.Sorted(maps.Keys(s.sessions)) {
+		sess := s.sessions[server]
+		t := hproto.Tunnel{
+			ServerURL: server, ServerName: sess.member.Name, Exclusive: sess.member.Exclusive,
+			Interface: sess.tun.Name(), AssignedIP: sess.assigned, Tenant: sess.spec.Tenant,
+		}
 		if !sess.lease.IsZero() {
 			lease := sess.lease
-			resp.LeaseExpiresAt = &lease
+			t.LeaseExpiresAt = &lease
 		}
+		resp.Tunnels = append(resp.Tunnels, t)
+	}
+	if len(s.lastErrs) > 0 {
+		resp.LastErrors = maps.Clone(s.lastErrs)
 	}
 	return resp
 }
 
-// Shutdown takes the tunnel down, for a helper that is stopping. It does not
+// Shutdown takes the tunnels down, for a helper that is stopping. It does not
 // deregister: a helper restarted by its service manager finds the server
 // still holding the lease, and a stopped machine's lease runs out.
 func (s *Server) Shutdown() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.stopLocked()
+	for server := range maps.Clone(s.sessions) {
+		s.stopLocked(server)
+	}
 }
 
 func reply(conn net.Conn, resp hproto.Response) { _ = json.NewEncoder(conn).Encode(resp) }

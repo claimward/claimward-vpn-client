@@ -10,21 +10,39 @@ import (
 	"time"
 
 	"github.com/claimward/claimward-vpn-client/pkg/appcore"
+	"github.com/claimward/claimward-vpn-client/pkg/exclusive"
 	"github.com/claimward/claimward-vpn-client/pkg/hproto"
+	"github.com/claimward/claimward-vpn-client/pkg/protocol"
 )
 
 // fake is a Service whose slow calls wait for the test.
 type fake struct {
 	mu      sync.Mutex
 	st      appcore.Status
-	cfg     appcore.Config
 	tenants []hproto.Tenant
+	logo    []byte
 
-	loginErr, connectErr, disconnectErr, logoutErr, tenantsErr, setTenantErr, updateErr error
+	loginErr, connectErr, disconnectErr, logoutErr, tenantsErr, setTenantErr, addErr, providerErr, removeErr error
 	// gate, when set, is waited for by every slow call.
 	gate  chan struct{}
 	calls []string
 }
+
+// clone copies a status so that no two owners share its server rows.
+func clone(s appcore.Status) appcore.Status {
+	s.Servers = append([]appcore.ServerStatus(nil), s.Servers...)
+	return s
+}
+
+// status is a configured app with one server.
+func status(helper bool, s appcore.ServerStatus) appcore.Status {
+	if s.URL == "" {
+		s.URL = srvURL
+	}
+	return appcore.Status{ConfigOK: true, HelperInstalled: helper, Servers: []appcore.ServerStatus{s}}
+}
+
+const srvURL = "https://vpn.example.org"
 
 func (f *fake) rec(s string) { f.mu.Lock(); f.calls = append(f.calls, s); f.mu.Unlock() }
 func (f *fake) wait(ctx context.Context) error {
@@ -38,34 +56,56 @@ func (f *fake) wait(ctx context.Context) error {
 		return ctx.Err()
 	}
 }
-func (f *fake) Status() appcore.Status       { f.mu.Lock(); defer f.mu.Unlock(); return f.st }
+func (f *fake) Status() appcore.Status       { f.mu.Lock(); defer f.mu.Unlock(); return clone(f.st) }
 func (f *fake) set(fn func(*appcore.Status)) { f.mu.Lock(); fn(&f.st); f.mu.Unlock() }
-func (f *fake) Config() appcore.Config       { return f.cfg }
-func (f *fake) UpdateConfig(c appcore.Config) error {
-	f.rec("update")
-	if f.updateErr == nil {
-		f.cfg = c
-	}
-	return f.updateErr
+
+// setSrv changes the first server's row.
+func (f *fake) setSrv(fn func(*appcore.ServerStatus)) {
+	f.mu.Lock()
+	f.st = clone(f.st)
+	fn(&f.st.Servers[0])
+	f.mu.Unlock()
 }
-func (f *fake) Login(ctx context.Context) error {
+func (f *fake) AddServer(ctx context.Context, raw string) (appcore.ServerEntry, error) {
+	f.rec("add:" + raw)
+	if f.addErr != nil {
+		return appcore.ServerEntry{}, f.addErr
+	}
+	return appcore.ServerEntry{URL: raw}, nil
+}
+func (f *fake) RemoveServer(ctx context.Context, server string) error {
+	f.rec("remove:" + server)
+	return f.removeErr
+}
+func (f *fake) SetProvider(ctx context.Context, server, id string) error {
+	f.rec("provider:" + server + ":" + id)
+	return f.providerErr
+}
+func (f *fake) Login(ctx context.Context, server, provider string) error {
 	f.rec("login")
 	if err := f.wait(ctx); err != nil {
 		return err
 	}
 	return f.loginErr
 }
-func (f *fake) Tenants(ctx context.Context) ([]hproto.Tenant, error) {
+func (f *fake) Tenants(ctx context.Context, server string) ([]hproto.Tenant, error) {
 	f.rec("tenants")
 	return f.tenants, f.tenantsErr
 }
-func (f *fake) SetTenant(id string) error { f.rec("settenant:" + id); return f.setTenantErr }
-func (f *fake) Connect(ctx context.Context) error {
-	f.rec("connect")
+func (f *fake) SetTenant(server, id string) error { f.rec("settenant:" + id); return f.setTenantErr }
+func (f *fake) Connect(ctx context.Context, server string) error {
+	f.rec("connect:" + server)
 	return f.connectErr
 }
-func (f *fake) Disconnect(ctx context.Context) error { f.rec("disconnect"); return f.disconnectErr }
-func (f *fake) Logout(ctx context.Context) error     { f.rec("logout"); return f.logoutErr }
+func (f *fake) Disconnect(ctx context.Context, server string) error {
+	f.rec("disconnect")
+	return f.disconnectErr
+}
+func (f *fake) Logout(ctx context.Context, server string) error { f.rec("logout"); return f.logoutErr }
+func (f *fake) Logo(ctx context.Context, server string) []byte {
+	f.rec("logo:" + server)
+	return f.logo
+}
 
 // harness collects every published state.
 type harness struct {
@@ -79,7 +119,7 @@ type harness struct {
 
 func newHarness(t *testing.T, st appcore.Status) *harness {
 	t.Helper()
-	h := &harness{f: &fake{st: st}}
+	h := &harness{f: &fake{st: clone(st)}}
 	h.Model = New(h.f, Options{
 		Open:       func(u string) error { h.opened = append(h.opened, u); return h.openEr },
 		Interval:   5 * time.Millisecond,
@@ -111,9 +151,9 @@ func (h *harness) settle(t *testing.T) State {
 }
 
 var (
-	signedOut = appcore.Status{ConfigOK: true, HelperInstalled: true, ServerURL: "https://vpn.example.org"}
-	signedIn  = appcore.Status{ConfigOK: true, HelperInstalled: true, LoggedIn: true, Email: "a@b.c", ServerURL: "https://vpn.example.org"}
-	up        = appcore.Status{ConfigOK: true, HelperInstalled: true, LoggedIn: true, Connected: true, AssignedIP: "10.0.0.2", Interface: "wg0"}
+	signedOut = status(true, appcore.ServerStatus{})
+	signedIn  = status(true, appcore.ServerStatus{LoggedIn: true, Email: "a@b.c"})
+	up        = status(true, appcore.ServerStatus{LoggedIn: true, Connected: true, AssignedIP: "10.0.0.2", Interface: "wg0"})
 )
 
 func TestDefaultsAndLoading(t *testing.T) {
@@ -127,7 +167,7 @@ func TestDefaultsAndLoading(t *testing.T) {
 	}
 	m.OpenSignInPage() // nothing to open: no panic, no change
 	m.mu.Lock()
-	m.st.DeviceVerificationURI = "https://x.example/d"
+	m.st.Servers = []appcore.ServerStatus{{URL: srvURL, DeviceVerificationURI: "https://x.example/d"}}
 	m.mu.Unlock()
 	m.OpenSignInPage()
 	if got := m.State().Error; got != "Could not open the browser: no browser to open. Open https://x.example/d yourself." {
@@ -145,10 +185,15 @@ func TestHeadlinesAndTexts(t *testing.T) {
 			State{Screen: ScreenUnconfigured, Headline: "Not configured", TrayText: "Claimward: not configured", Problem: "no server",
 				Account: "Not signed in", Address: "Not connected", Actions: ActionsSignedOut, Slot: SlotNone}},
 		{"signed out", signedOut,
-			State{Screen: ScreenMain, Headline: "Signed out", TrayText: "Claimward: signed out", Server: "https://vpn.example.org",
+			State{Screen: ScreenMain, Headline: "Signed out", TrayText: "Claimward: signed out", Server: srvURL, ServerName: srvURL,
+				Account: "Not signed in", Address: "Not connected", Actions: ActionsSignedOut, Slot: SlotNone}},
+		{"no server yet", appcore.Status{ConfigOK: true},
+			State{Screen: ScreenUnconfigured, Headline: "Not configured", TrayText: "Claimward: not configured",
+				Problem: "No server yet: add one by typing its URL.",
 				Account: "Not signed in", Address: "Not connected", Actions: ActionsSignedOut, Slot: SlotNone}},
 		{"up", up,
 			State{Screen: ScreenMain, Headline: "Connected", TrayText: "Claimward: connected (10.0.0.2)", Account: "Signed in",
+				Server: srvURL, ServerName: srvURL,
 				Address: "10.0.0.2 on wg0", Actions: ActionsConnected, Slot: SlotChooseTenant, Connected: true, LoggedIn: true,
 				Tenant: "Tenant: the server's choice", TenantLocked: true}},
 	}
@@ -160,7 +205,8 @@ func TestHeadlinesAndTexts(t *testing.T) {
 		got.Helper, c.want.Helper = "", ""
 		got.TenantOptions, c.want.TenantOptions = nil, nil
 		got.ConfigPath = ""
-		if c.name == "unconfigured" || c.name == "signed out" {
+		got.Servers, got.ProviderOptions = nil, nil
+		if c.name != "up" {
 			got.TenantLocked = false
 		}
 		if !reflect.DeepEqual(got, c.want) {
@@ -168,14 +214,14 @@ func TestHeadlinesAndTexts(t *testing.T) {
 		}
 	}
 	// Variants.
-	h := newHarness(t, appcore.Status{ConfigOK: true, Connected: true, LoggedIn: true, Email: "e@x"})
+	h := newHarness(t, status(false, appcore.ServerStatus{Connected: true, LoggedIn: true, Email: "e@x"}))
 	h.Refresh()
 	s := h.State()
 	if s.Address != "address unknown on —" || s.TrayText != "Claimward: connected" || s.Account != "Signed in as e@x" ||
 		s.Helper != "Privileged helper: not running (see the README)" {
 		t.Fatalf("%+v", s)
 	}
-	h.f.set(func(s *appcore.Status) { *s = appcore.Status{ConfigOK: true, LoggedIn: true} })
+	h.f.set(func(s *appcore.Status) { *s = status(false, appcore.ServerStatus{LoggedIn: true}) })
 	h.Refresh()
 	if s := h.State(); s.TrayText != "Claimward: helper not running" || s.Headline != "Disconnected" {
 		t.Fatalf("%+v", s)
@@ -199,7 +245,7 @@ func TestSignInFlow(t *testing.T) {
 		t.Fatalf("%+v", s)
 	}
 	h.SignIn() // already running: ignored
-	h.f.set(func(s *appcore.Status) {
+	h.f.setSrv(func(s *appcore.ServerStatus) {
 		s.DeviceVerificationURI, s.DeviceUserCode = "https://idp.example/device", "ABCD-1234"
 	})
 	h.Refresh()
@@ -207,7 +253,7 @@ func TestSignInFlow(t *testing.T) {
 	if s.SignInHint != "Open the sign-in page, then enter this code:" || s.SignInCode != "ABCD-1234" || !s.Can.OpenSignInPage {
 		t.Fatalf("%+v", s)
 	}
-	h.f.set(func(s *appcore.Status) { s.DeviceUserCode = "" })
+	h.f.setSrv(func(s *appcore.ServerStatus) { s.DeviceUserCode = "" })
 	h.Refresh()
 	if h.State().SignInHint != "Complete the sign-in in your browser." {
 		t.Fatal(h.State().SignInHint)
@@ -233,7 +279,7 @@ func TestSignInFailureAndSuccess(t *testing.T) {
 		t.Fatalf("%+v", s)
 	}
 	h.f.loginErr = nil
-	h.f.set(func(s *appcore.Status) { s.LoggedIn = true })
+	h.f.setSrv(func(s *appcore.ServerStatus) { s.LoggedIn = true })
 	h.Refresh()
 	h.SignIn() // signed in now: refused
 	if s := h.settle(t); s.Error != "Sign-in failed: denied" || s.Slot != SlotChooseTenant {
@@ -244,7 +290,7 @@ func TestSignInFailureAndSuccess(t *testing.T) {
 func TestOpenSignInPageRefusals(t *testing.T) {
 	h := newHarness(t, signedOut)
 	for _, bad := range []string{"file:///etc/passwd", "javascript:alert(1)", "https://", "ht tp://%zz", "calc.exe"} {
-		h.f.set(func(s *appcore.Status) { s.DeviceVerificationURI = bad })
+		h.f.setSrv(func(s *appcore.ServerStatus) { s.DeviceVerificationURI = bad })
 		h.Refresh()
 		h.OpenSignInPage()
 		if !strings.HasPrefix(h.State().Error, "Not opening ") {
@@ -254,7 +300,7 @@ func TestOpenSignInPageRefusals(t *testing.T) {
 	if len(h.opened) != 0 {
 		t.Fatal(h.opened)
 	}
-	h.f.set(func(s *appcore.Status) { s.DeviceVerificationURI = "http://localhost:5556/device" })
+	h.f.setSrv(func(s *appcore.ServerStatus) { s.DeviceVerificationURI = "http://localhost:5556/device" })
 	h.Refresh()
 	h.openEr = errors.New("no xdg-open")
 	h.OpenSignInPage()
@@ -279,7 +325,7 @@ func TestConnectDisconnectSignOut(t *testing.T) {
 	if s := h.settle(t); s.Error != "Connection failed: boom" {
 		t.Fatal(s.Error)
 	}
-	h.f.set(func(s *appcore.Status) { s.Connected = true })
+	h.f.setSrv(func(s *appcore.ServerStatus) { s.Connected = true })
 	h.Refresh()
 	h.Connect() // connected: ignored
 	h.f.disconnectErr = errors.New("stuck")
@@ -300,7 +346,8 @@ func TestConnectDisconnectSignOut(t *testing.T) {
 	if s := h.settle(t); s.Error != "" {
 		t.Fatal(s.Error)
 	}
-	want := []string{"connect", "connect", "connect", "disconnect", "disconnect", "logout", "logout"}
+	c := "connect:" + srvURL
+	want := []string{c, c, c, "disconnect", "disconnect", "logout", "logout"}
 	if !reflect.DeepEqual(h.f.log(), want) {
 		t.Fatalf("%v", h.f.log())
 	}
@@ -326,7 +373,7 @@ func TestTenants(t *testing.T) {
 		}
 	}
 
-	h.f.set(func(s *appcore.Status) {
+	h.f.setSrv(func(s *appcore.ServerStatus) {
 		s.Tenants = []hproto.Tenant{{ID: "acme", Name: "Acme"}, {ID: "x", Name: "x"}, {ID: "y"}}
 		s.TenantRequired = true
 	})
@@ -356,7 +403,7 @@ func TestTenants(t *testing.T) {
 	}
 	// Locked while connected.
 	h.f.setTenantErr = nil
-	h.f.set(func(s *appcore.Status) { s.Connected, s.Tenant = true, "acme" })
+	h.f.setSrv(func(s *appcore.ServerStatus) { s.Connected, s.Tenant = true, "acme" })
 	h.Refresh()
 	n = len(h.f.log())
 	h.SelectTenant(2)
@@ -364,16 +411,15 @@ func TestTenants(t *testing.T) {
 		t.Fatal("locked")
 	}
 	// An unlisted tenant, and a server choice.
-	h.f.set(func(s *appcore.Status) { s.Connected, s.Tenant, s.TenantRequired = false, "gone", false })
+	h.f.setSrv(func(s *appcore.ServerStatus) { s.Connected, s.Tenant, s.TenantRequired = false, "gone", false })
 	h.Refresh()
 	if s := h.State(); s.Tenant != "Tenant: gone" || s.TenantIndex != 0 || s.TenantOptions[0].Label != "No tenant chosen" {
 		t.Fatalf("%+v", s)
 	}
 }
 
-func TestSettings(t *testing.T) {
-	h := newHarness(t, appcore.Status{ConfigError: "no server"})
-	h.f.cfg = appcore.Config{ServerURL: "https://vpn", Provider: "go-authn", OIDCIssuer: "https://i", OIDCClientID: "c", GitHubClientID: "g"}
+func TestAddingAServer(t *testing.T) {
+	h := newHarness(t, appcore.Status{ConfigOK: true})
 	h.Refresh()
 	h.SaveSettings(Form{}) // not open: ignored
 	h.CloseSettings()      // not open: ignored
@@ -381,7 +427,7 @@ func TestSettings(t *testing.T) {
 		t.Fatal(h.f.log())
 	}
 	f, ok := h.OpenSettings()
-	if !ok || f.Provider != "go-authn" || f.ServerURL != "https://vpn" || f.GitHubClientID != "g" || f.OIDCIssuer != "https://i" || f.OIDCClientID != "c" {
+	if !ok || f != (Form{}) {
 		t.Fatalf("%+v %v", f, ok)
 	}
 	if s := h.State(); s.Screen != ScreenSettings || s.Can.OpenSettings || !s.Can.SaveSettings || s.ConfigPath != "/cfg.json" {
@@ -396,34 +442,34 @@ func TestSettings(t *testing.T) {
 		t.Fatal("left the form")
 	}
 	h.SaveSettings(Form{ServerURL: "ftp://x"})
-	if s := h.State(); !strings.HasPrefix(s.SettingsError, "The server URL must be an http(s) URL") || s.Screen != ScreenSettings {
+	if s := h.State(); !strings.HasPrefix(s.SettingsError, "The server URL must be an https URL") || s.Screen != ScreenSettings {
 		t.Fatalf("%+v", s)
 	}
-	h.f.updateErr = errors.New("read-only")
-	h.SaveSettings(Form{ServerURL: " https://vpn.example.org ", Provider: "nonsense"})
-	if s := h.settle(t); s.SettingsError != "Saving failed: read-only" || s.Screen != ScreenSettings {
+	h.SaveSettings(Form{}) // nothing typed: refused before the network
+	if s := h.State(); s.SettingsError == "" || len(h.f.log()) != 0 {
+		t.Fatalf("%+v %v", s, h.f.log())
+	}
+	// A URL that is no Claimward server's stays in the form, with the reason.
+	h.f.addErr = errors.New("no discovery document")
+	h.SaveSettings(Form{ServerURL: " https://vpn.example.org "})
+	if s := h.settle(t); s.SettingsError != "Adding the server failed: no discovery document" || s.Screen != ScreenSettings {
 		t.Fatalf("%+v", s)
 	}
-	h.f.updateErr = nil
-	h.SaveSettings(Form{ServerURL: "https://vpn.example.org", Provider: "github"})
+	h.f.addErr = nil
+	h.SaveSettings(Form{ServerURL: srvURL})
 	s := h.settle(t)
-	if s.SettingsError != "" || s.Screen != ScreenUnconfigured || !strings.HasPrefix(s.Error, "Saved, but not complete: ") {
+	if s.SettingsError != "" || s.Screen != ScreenUnconfigured {
 		t.Fatalf("%+v", s)
 	}
-	if h.f.cfg.ServerURL != "https://vpn.example.org" || h.f.cfg.Provider != "github" {
-		t.Fatalf("%+v", h.f.cfg)
+	if got := h.f.log(); !reflect.DeepEqual(got, []string{"add:" + srvURL, "add:" + srvURL}) {
+		t.Fatalf("%v", got)
 	}
-	// Complete, and an empty server URL is let through to the validation.
-	h.OpenSettings()
-	h.SaveSettings(Form{ServerURL: "https://vpn.example.org", Provider: "github", GitHubClientID: "Iv1.abc"})
+	// The status then lists it, and the new server is the one shown.
 	h.f.set(func(s *appcore.Status) { *s = signedOut })
-	if s := h.settle(t); s.Error != "" {
+	h.Refresh()
+	if s := h.State(); s.Server != srvURL || s.Screen != ScreenMain {
 		t.Fatalf("%+v", s)
 	}
-	h.Refresh()
-	h.OpenSettings()
-	h.SaveSettings(Form{})
-	h.settle(t)
 	h.OpenSettings()
 	h.SettingsErrorForTest("x")
 	h.CloseSettings()
@@ -444,12 +490,132 @@ func TestSettings(t *testing.T) {
 // SettingsErrorForTest sets a settings error, to see CloseSettings clear it.
 func (m *Model) SettingsErrorForTest(s string) { m.mu.Lock(); m.settingsErr = s; m.mu.Unlock() }
 
-func TestProviders(t *testing.T) {
-	if ProviderIndex("oidc") != 1 || ProviderIndex("nope") != 0 || ProviderIndex("go-authn") != 2 {
-		t.Fatal("index")
+var twoProviders = []protocol.Provider{
+	{ID: "gh", Kind: protocol.KindGitHub, Name: "GitHub"},
+	{ID: "uni", Kind: protocol.KindOIDC, Name: "Uni"},
+}
+
+// With several providers the person chooses; the choice is the server's.
+func TestProviderChoice(t *testing.T) {
+	h := newHarness(t, status(true, appcore.ServerStatus{Name: "Campus", Providers: twoProviders}))
+	h.Refresh()
+	s := h.State()
+	want := []ProviderOption{{ID: "gh", Label: "GitHub"}, {ID: "uni", Label: "Uni"}}
+	if !s.NeedsProvider || s.Can.SignIn || !s.Can.ChooseProvider || !reflect.DeepEqual(s.ProviderOptions, want) || s.ServerName != "Campus" {
+		t.Fatalf("%+v", s)
 	}
-	if UsesIssuer("github") || UsesIssuer("") || !UsesIssuer("oidc") || !UsesIssuer("go-authn") {
-		t.Fatal("issuer")
+	h.SignIn() // refused: no choice yet
+	h.SelectProvider(5)
+	h.SelectProvider(-1)
+	if len(h.f.log()) != 0 {
+		t.Fatal(h.f.log())
+	}
+	h.f.providerErr = errors.New("gone")
+	h.SelectProvider(1)
+	if s := h.settle(t); s.Error != "Choosing the identity provider failed: gone" {
+		t.Fatalf("%+v", s)
+	}
+	h.f.providerErr = nil
+	h.SelectProvider(1)
+	h.settle(t)
+	if got := h.f.log(); !reflect.DeepEqual(got, []string{"provider:" + srvURL + ":uni", "provider:" + srvURL + ":uni"}) {
+		t.Fatalf("%v", got)
+	}
+	h.f.setSrv(func(s *appcore.ServerStatus) { s.Provider = "uni" })
+	h.Refresh()
+	if s := h.State(); s.NeedsProvider || s.ProviderIndex != 1 || !s.Can.SignIn {
+		t.Fatalf("%+v", s)
+	}
+	// A library that still wants a choice is explained.
+	h.f.loginErr = appcore.ErrProviderRequired
+	h.SignIn()
+	if s := h.settle(t); s.Error != "Choose an identity provider, then sign in." {
+		t.Fatalf("%+v", s)
+	}
+}
+
+var twoServers = appcore.Status{ConfigOK: true, HelperInstalled: true, Servers: []appcore.ServerStatus{
+	{URL: "https://a.example.org", Name: "A", LoggedIn: true},
+	{URL: "https://b.example.org", Name: "B", Exclusive: true, LoggedIn: true, Connected: true},
+}}
+
+func TestSeveralServers(t *testing.T) {
+	h := newHarness(t, twoServers)
+	h.Refresh()
+	s := h.State()
+	if s.Server != "https://a.example.org" || s.ServerName != "A" || s.ServerIndex != 0 || !s.Can.SelectServer || len(s.Servers) != 2 ||
+		!s.Servers[0].Selected || s.Servers[1].Selected || !s.Servers[1].Exclusive || !s.Servers[1].Connected {
+		t.Fatalf("%+v", s)
+	}
+	h.SelectServer(7) // out of range
+	if h.State().Server != "https://a.example.org" {
+		t.Fatal("moved")
+	}
+	// The exclusive refusal names the server in the way.
+	refusal := exclusive.Check(exclusive.Member{URL: "https://a.example.org", Name: "A"},
+		[]exclusive.Member{{URL: "https://b.example.org", Name: "B", Exclusive: true}})
+	if refusal == nil {
+		t.Fatal("exclusive.Check let a second server in")
+	}
+	h.f.connectErr = refusal
+	h.Connect()
+	if s := h.settle(t); s.Error != "Not connected: "+refusal.Error() || !strings.Contains(s.Error, "B") {
+		t.Fatalf("%q", s.Error)
+	}
+	if got := h.f.log(); !reflect.DeepEqual(got, []string{"connect:https://a.example.org"}) {
+		t.Fatalf("%v", got)
+	}
+	// Selecting another server leaves the first alone and shows the other.
+	h.SelectServer(1)
+	s = h.State()
+	if s.Server != "https://b.example.org" || s.ServerIndex != 1 || !s.Exclusive || !s.Connected || !s.Servers[1].Selected {
+		t.Fatalf("%+v", s)
+	}
+	h.Disconnect()
+	h.settle(t)
+	h.RemoveServer()
+	h.settle(t)
+	if got := h.f.log(); got[len(got)-2] != "disconnect" || got[len(got)-1] != "remove:https://b.example.org" {
+		t.Fatalf("%v", got)
+	}
+	h.f.logo = []byte("<svg/>")
+	if string(h.Logo()) != "<svg/>" {
+		t.Fatal("logo")
+	}
+	// The removed server is no longer the selected one: the logo is the first's.
+	if got := h.f.log(); got[len(got)-1] != "logo:https://a.example.org" {
+		t.Fatalf("the logo is asked per server: %v", got)
+	}
+	h.f.removeErr = errors.New("busy")
+	h.RemoveServer()
+	if s := h.settle(t); s.Error != "Removing the server failed: busy" {
+		t.Fatalf("%+v", s)
+	}
+}
+
+func TestTheTrayCountsConnectedServers(t *testing.T) {
+	st := clone(twoServers)
+	st.Servers[0].Connected, st.Servers[0].AssignedIP = true, "10.0.0.2"
+	h := newHarness(t, st)
+	h.Refresh()
+	if s := h.State(); s.TrayText != "Claimward: connected to 2 servers" || s.Headline != "Connected" {
+		t.Fatalf("%+v", s)
+	}
+}
+
+// Events are per server, and name it.
+func TestEventsNameTheirServer(t *testing.T) {
+	h := newHarness(t, twoServers)
+	get, _ := collectEvents(h.Model)
+	h.Refresh()
+	h.f.set(func(s *appcore.Status) {
+		s.Servers = clone(twoServers).Servers
+		s.Servers[1].Connected = false // B drops while A is the one on screen
+	})
+	h.Refresh()
+	ev := get()
+	if len(ev) != 1 || ev[0].Kind != EventDropped || !strings.Contains(ev[0].Title, "B") {
+		t.Fatalf("%+v", ev)
 	}
 }
 
@@ -559,7 +725,7 @@ func TestEventsOnTransitionsOnly(t *testing.T) {
 	if len(get()) != 0 {
 		t.Fatal(get())
 	}
-	h.f.set(func(s *appcore.Status) { s.Connected = false })
+	h.f.setSrv(func(s *appcore.ServerStatus) { s.Connected = false })
 	for range 10 {
 		h.Refresh()
 	}
@@ -567,9 +733,9 @@ func TestEventsOnTransitionsOnly(t *testing.T) {
 		t.Fatalf("10 polls in the dropped state: %+v", ev)
 	}
 	// Up again, then the session expires under a running tunnel.
-	h.f.set(func(s *appcore.Status) { s.Connected = true })
+	h.f.setSrv(func(s *appcore.ServerStatus) { s.Connected = true })
 	h.Refresh()
-	h.f.set(func(s *appcore.Status) { s.Connected, s.LoggedIn = false, false })
+	h.f.setSrv(func(s *appcore.ServerStatus) { s.Connected, s.LoggedIn = false, false })
 	for range 3 {
 		h.Refresh()
 	}
@@ -579,7 +745,7 @@ func TestEventsOnTransitionsOnly(t *testing.T) {
 	cancel()
 	h.f.set(func(s *appcore.Status) { *s = up })
 	h.Refresh()
-	h.f.set(func(s *appcore.Status) { s.Connected = false })
+	h.f.setSrv(func(s *appcore.ServerStatus) { s.Connected = false })
 	h.Refresh()
 	if len(get()) != 2 {
 		t.Fatal("notified after cancel")
@@ -591,17 +757,17 @@ func TestOwnDisconnectAndSignOutAreNoEvents(t *testing.T) {
 	h.Refresh()
 	get, _ := collectEvents(h.Model)
 	h.f.disconnectErr = nil
-	h.f.set(func(s *appcore.Status) {}) // the fake keeps reporting up: the tunnel is not really down
+	h.f.setSrv(func(s *appcore.ServerStatus) {}) // the fake keeps reporting up: the tunnel is not really down
 	h.Disconnect()
 	h.settle(t)
 	// The status the action ends with says down: the person asked for it.
 	h.f.gate = make(chan struct{})
 	h.Apply(up)
-	h.f.set(func(s *appcore.Status) { s.Connected = false })
+	h.f.setSrv(func(s *appcore.ServerStatus) { s.Connected = false })
 	h.Disconnect()
 	h.settle(t)
 	h.Apply(up)
-	h.f.set(func(s *appcore.Status) { s.Connected, s.LoggedIn = false, false })
+	h.f.setSrv(func(s *appcore.ServerStatus) { s.Connected, s.LoggedIn = false, false })
 	h.SignOut()
 	h.settle(t)
 	if len(get()) != 0 {
@@ -627,12 +793,15 @@ func TestRefusedCommandsDoNothing(t *testing.T) {
 		t.Fatalf("%v %+v", h.f.log(), h.State())
 	}
 	// A tenant choice while an action runs, and one that moves nothing.
-	h.f.st = signedIn
-	h.f.st.Tenants = []hproto.Tenant{{ID: "a"}, {ID: "b"}}
+	h.f.st = clone(signedIn)
+	h.f.st.Servers[0].Tenants = []hproto.Tenant{{ID: "a"}, {ID: "b"}}
 	h.f.gate = make(chan struct{})
-	h.Apply(appcore.Status{ConfigOK: true, HelperInstalled: true})
+	h.Apply(signedOut)
 	h.SignIn()
-	for len(h.f.log()) == 0 { // Login is under way, waiting for the gate
+	for deadline := time.Now().Add(5 * time.Second); len(h.f.log()) == 0; { // Login is under way, waiting for the gate
+		if time.Now().After(deadline) {
+			t.Fatal("the sign-in never started")
+		}
 		time.Sleep(time.Millisecond)
 	}
 	before := h.State()
@@ -642,7 +811,7 @@ func TestRefusedCommandsDoNothing(t *testing.T) {
 	}
 	close(h.f.gate)
 	h.settle(t)
-	h.Apply(h.f.st)
+	h.Apply(h.f.Status())
 	h.SelectTenant(0) // already the chosen row
 	h.SelectTenant(1)
 	h.SelectTenant(len(h.State().TenantOptions))

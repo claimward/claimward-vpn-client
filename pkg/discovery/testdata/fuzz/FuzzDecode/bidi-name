@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"version\":2,\"providers\":[{\"id\":\"a\",\"kind\":\"github\",\"name\":\"G\\u202e\",\"github_client_id\":\"x\"}]}")
