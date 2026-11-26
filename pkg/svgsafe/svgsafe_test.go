@@ -1,6 +1,8 @@
 package svgsafe
 
 import (
+	"encoding/xml"
+	"io"
 	"strings"
 	"testing"
 )
@@ -86,6 +88,31 @@ func TestEachRefusalIsItsOwn(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want one containing %q", name, err, tc.want)
 		}
+	}
+}
+
+// The decode loop ends even when the decoder never does: every token consumes a
+// byte, so more reads than bytes is a refusal. The bound is exact -- a document
+// whose tokens are all one byte long, then EOF, passes.
+func TestDecodeLoopIsBounded(t *testing.T) {
+	forever := func() (xml.Token, error) { return xml.Comment("x"), nil }
+	err := validate(forever, 3)
+	if err == nil || !strings.Contains(err.Error(), "no progress") {
+		t.Errorf("an endless decoder: %v", err)
+	}
+	// 3 bytes, 3 tokens, then EOF: the EOF read is read number 3 (from 0).
+	svg := xml.StartElement{Name: xml.Name{Space: svgNS, Local: "svg"}}
+	seq := []xml.Token{svg, xml.EndElement{Name: svg.Name}, xml.Comment("")}
+	i := 0
+	next := func() (xml.Token, error) {
+		if i == len(seq) {
+			return nil, io.EOF
+		}
+		i++
+		return seq[i-1], nil
+	}
+	if err := validate(next, 3); err != nil {
+		t.Errorf("3 tokens in 3 bytes refused: %v", err)
 	}
 }
 

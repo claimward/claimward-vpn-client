@@ -51,16 +51,21 @@ func Validate(b []byte) error {
 	dec := xml.NewDecoder(bytes.NewReader(b))
 	dec.Strict = true
 	dec.Entity = nil // the five predefined entities only
+	return validate(dec.Token, len(b))
+}
+
+// validate walks the tokens next yields; size is the document's length in bytes.
+func validate(next func() (xml.Token, error), size int) error {
 	depth, elements, roots := 0, 0, 0
 	inStyle := 0
 	for tokens := 0; ; tokens++ {
 		// A bound, not an argument: every token consumes at least one byte, so
 		// more tokens than bytes means the decoder is repeating itself (it
 		// returns the same syntax error for ever).
-		if tokens > len(b) {
+		if tokens > size {
 			return errors.New("svg: the decoder made no progress")
 		}
-		tok, err := dec.Token()
+		tok, err := next()
 		if err == io.EOF {
 			break
 		}
