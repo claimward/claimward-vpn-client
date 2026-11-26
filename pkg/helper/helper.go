@@ -49,9 +49,14 @@ import (
 // Config is the helper's own configuration, read from a file only an
 // administrator can write.
 type Config struct {
-	// Servers are the claimward-vpn-server base URLs the helper may enroll
-	// with. Required: a helper that trusts no server connects nowhere.
-	Servers []string `json:"servers"`
+	// Servers are claimward-vpn-server base URLs the administrator approves
+	// in advance: the helper enrolls with them without asking anybody. Any
+	// other server needs the system's consent first (ActionApprove). May be
+	// empty.
+	Servers []string `json:"servers,omitempty"`
+	// Approvals is the file the approved servers are kept in. Empty:
+	// DefaultApprovalsPath.
+	Approvals string `json:"approvals,omitempty"`
 	// Group may use the socket beside root (unix). Empty: the platform's
 	// default (DefaultGroup).
 	Group string `json:"group,omitempty"`
@@ -73,9 +78,6 @@ func LoadConfig(path string) (*Config, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	if len(c.Servers) == 0 {
-		return nil, fmt.Errorf("%s: no servers: the helper must be told which claimward-vpn-server it may connect to", path)
-	}
 	for _, s := range c.Servers {
 		if err := secureurl.Check(s); err != nil {
 			return nil, fmt.Errorf("%s: server %q: %w", path, s, err)
@@ -86,6 +88,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if c.Socket == "" {
 		c.Socket = hproto.DefaultSocketPath
+	}
+	if c.Approvals == "" {
+		c.Approvals = DefaultApprovalsPath
 	}
 	return &c, nil
 }
@@ -112,6 +117,12 @@ type Server struct {
 	// retryAfter is how long to wait after a renewal that did not reach the
 	// server, or reached it broken.
 	retryAfter time.Duration
+
+	approvals *approvals
+	authz     Authorizer
+	// approving is held while the system's consent is being asked for: one
+	// prompt at a time, so a process cannot flood the person with them.
+	approving sync.Mutex
 
 	mu sync.Mutex
 	// sessions are the enrollments behind the live tunnels, by canonical
@@ -165,8 +176,13 @@ func RenewDelay(remaining time.Duration) time.Duration { return renewDelay(remai
 // ("app-osx", ...), as the server's admin sees the device.
 func New(cfg Config, os, platform string, log *slog.Logger) *Server {
 	disc := discovery.New(nil)
+	if cfg.Approvals == "" {
+		cfg.Approvals = DefaultApprovalsPath
+	}
 	return &Server{
 		cfg: cfg, os: os, platform: platform, log: log,
+		approvals: &approvals{path: cfg.Approvals, verify: checkOwner},
+		authz:     DefaultAuthorizer(),
 		up: func(c wgtun.Config) (Tunnel, error) {
 			t, err := wgtun.Up(c)
 			if err != nil {
@@ -200,8 +216,21 @@ func (s *Server) UseDiscovery(d func(ctx context.Context, server string) (*proto
 	s.discover = d
 }
 
+// UseAuthorizer replaces how the system's consent to a server is obtained
+// (DefaultAuthorizer by default): for tests, and for a platform that obtains
+// it another way.
+func (s *Server) UseAuthorizer(a Authorizer) { s.authz = a }
+
 // Serve answers connections until ln is closed.
-func (s *Server) Serve(ln net.Listener) error {
+func (s *Server) Serve(ln net.Listener) error { return s.serve(ln, false) }
+
+// ServeElevated answers connections on a listener the operating system opens
+// to elevated processes alone (Windows: ListenElevated). A connection on it
+// is the consent ActionApprove asks for, and the DefaultAuthorizer there
+// accepts nothing else.
+func (s *Server) ServeElevated(ln net.Listener) error { return s.serve(ln, true) }
+
+func (s *Server) serve(ln net.Listener, elevated bool) error {
 	sem := make(chan struct{}, maxConns)
 	for {
 		conn, err := ln.Accept()
@@ -215,7 +244,7 @@ func (s *Server) Serve(ln net.Listener) error {
 		case sem <- struct{}{}:
 			go func() {
 				defer func() { <-sem }()
-				s.handle(conn)
+				s.handle(conn, elevated)
 			}()
 		default:
 			// Too many open at once: refuse rather than queue (audit 2026-11-23).
@@ -232,8 +261,15 @@ const (
 	maxConns = 32
 )
 
-func (s *Server) handle(conn net.Conn) {
+func (s *Server) handle(conn net.Conn, elevated bool) {
 	defer conn.Close()
+	// A bug in answering one request must not take the other tunnels of the
+	// machine down with the helper: the request is dropped, loudly.
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("request handler panicked", "panic", r)
+		}
+	}()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
 	var req hproto.Request
 	if err := json.NewDecoder(io.LimitReader(conn, maxRequestBytes)).Decode(&req); err != nil {
@@ -251,44 +287,103 @@ func (s *Server) handle(conn net.Conn) {
 		reply(conn, s.down(req.Connect))
 	case hproto.ActionStatus:
 		reply(conn, s.status())
+	case hproto.ActionApprove:
+		// Asking the person takes as long as the person does.
+		_ = conn.SetDeadline(time.Now().Add(approveTimeout + 30*time.Second))
+		reply(conn, s.approve(conn, elevated, req.Connect))
+	case hproto.ActionRevoke:
+		reply(conn, s.revoke(req.Connect))
+	case hproto.ActionApproved:
+		reply(conn, s.approvedList())
 	default:
 		reply(conn, hproto.Response{Error: "unknown action: " + req.Action})
 	}
 }
 
-// allowedServer is the canonical URL of the configured server rawURL names.
-func (s *Server) allowedServer(rawURL string) (string, error) {
-	want, err := secureurl.Canonical(rawURL)
-	if err != nil {
-		return "", fmt.Errorf("server %q: %w", rawURL, err)
-	}
+// adminServer says whether the administrator's configuration names server (a
+// canonical URL).
+func (s *Server) adminServer(server string) bool {
 	for _, u := range s.cfg.Servers {
-		if c, err := secureurl.Canonical(u); err == nil && c == want {
-			return c, nil
+		if c, err := secureurl.Canonical(u); err == nil && c == server {
+			return true
 		}
 	}
-	return "", fmt.Errorf("server %q is not one this helper is configured for", rawURL)
+	return false
 }
 
-// allowed is the canonical server URL spec names, if the helper's
-// configuration allows it and spec carries a bearer and a valid provider.
-func (s *Server) allowed(spec *hproto.ConnectSpec) (string, error) {
+// How much of a server's identity trust reads.
+const (
+	// trustFresh reads the discovery document and returns it: a connection.
+	trustFresh = iota
+	// trustApproved reads it only for a server that was approved, to check
+	// that it is still the one that was.
+	trustApproved
+	// trustListed reads nothing: the renewal of a connection that was checked.
+	trustListed
+)
+
+// trust is the canonical URL of the server rawURL names, and its discovery
+// document when it was read, if the helper may deal with the server: the
+// administrator named it, or it was approved and is still what was approved.
+// Otherwise the response to give instead.
+func (s *Server) trust(ctx context.Context, rawURL string, mode int) (string, *protocol.Configuration, *hproto.Response) {
+	server, err := secureurl.Canonical(rawURL)
+	if err != nil {
+		return "", nil, &hproto.Response{Error: fmt.Sprintf("server %q: %v", rawURL, err)}
+	}
+	var entry approvedEntry
+	admin := s.adminServer(server)
+	if !admin {
+		e, ok, err := s.approvals.lookup(server)
+		if err != nil { // fail closed
+			return "", nil, &hproto.Response{Error: "approved servers: " + err.Error()}
+		}
+		if !ok {
+			return "", nil, &hproto.Response{ErrorCode: hproto.ErrNotApproved,
+				Error: fmt.Sprintf("server %q is not approved: it needs the system's authorization first (approve)", rawURL)}
+		}
+		entry = e
+	}
+	if mode == trustListed || (mode == trustApproved && admin) {
+		return server, nil, nil
+	}
+	cfg, err := s.discover(ctx, server)
+	if err == nil && cfg == nil {
+		err = errors.New("empty answer")
+	}
+	if err != nil {
+		// Fail closed: without the document the helper can tell neither
+		// whether the server is exclusive nor whether it is the one approved.
+		return "", nil, &hproto.Response{Error: "discovery: " + err.Error(), ErrorCode: hproto.ErrDiscovery}
+	}
+	if !admin && Identity(cfg) != entry.Identity {
+		return "", nil, &hproto.Response{ErrorCode: hproto.ErrIdentityChanged,
+			Error: fmt.Sprintf("server %q no longer says what it said when it was approved (its name or identity providers changed): approve it again", rawURL)}
+	}
+	return server, cfg, nil
+}
+
+// checkSpec refuses a connect spec with no bearer or a bad provider.
+func checkSpec(spec *hproto.ConnectSpec) error {
 	if spec == nil || spec.Bearer == "" {
-		return "", errors.New("missing connect spec")
+		return errors.New("missing connect spec")
 	}
 	if spec.Provider != "" && !protocol.ValidProviderID(spec.Provider) {
-		return "", errors.New("invalid provider id")
+		return errors.New("invalid provider id")
 	}
-	return s.allowedServer(spec.ServerURL)
+	return nil
 }
 
 func (s *Server) tenants(spec *hproto.ConnectSpec) hproto.Response {
-	server, err := s.allowed(spec)
-	if err != nil {
+	if err := checkSpec(spec); err != nil {
 		return hproto.Response{Error: err.Error()}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.enrollTimeout)
 	defer cancel()
+	server, _, fail := s.trust(ctx, spec.ServerURL, trustApproved)
+	if fail != nil {
+		return *fail
+	}
 	ts, err := client.New(server).WithProvider(spec.Provider).Tenants(ctx, spec.Bearer)
 	if err != nil {
 		return hproto.Response{Error: "tenants: " + err.Error()}
@@ -325,8 +420,7 @@ func refusal(err *exclusive.Error) hproto.Response {
 // A first connection (gen 0) reads the server's discovery document and is
 // refused if the server, or one already connected, is exclusive.
 func (s *Server) enroll(spec *hproto.ConnectSpec, gen uint64, member *exclusive.Member) hproto.Response {
-	server, err := s.allowed(spec)
-	if err != nil {
+	if err := checkSpec(spec); err != nil {
 		return hproto.Response{Error: err.Error()}
 	}
 	pair, err := wgkey.ParsePrivate(spec.PrivateKey)
@@ -336,20 +430,17 @@ func (s *Server) enroll(spec *hproto.ConnectSpec, gen uint64, member *exclusive.
 	ctx, cancel := context.WithTimeout(context.Background(), s.enrollTimeout)
 	defer cancel()
 
+	mode := trustFresh
+	if member != nil {
+		mode = trustListed
+	}
+	server, doc, fail := s.trust(ctx, spec.ServerURL, mode)
+	if fail != nil {
+		return *fail
+	}
+
 	if member == nil {
-		cfg, err := s.discover(ctx, server)
-		if cfg == nil { // a resolver that answered nothing is no answer
-			cfg = &protocol.Configuration{}
-			if err == nil {
-				err = errors.New("empty answer")
-			}
-		}
-		if err != nil {
-			// Fail closed: without the document the helper cannot tell whether
-			// the server is exclusive.
-			return hproto.Response{Error: "discovery: " + err.Error(), ErrorCode: hproto.ErrDiscovery}
-		}
-		member = &exclusive.Member{URL: server, Name: cfg.ServerName, Exclusive: cfg.Exclusive}
+		member = &exclusive.Member{URL: server, Name: doc.ServerName, Exclusive: doc.Exclusive}
 		s.mu.Lock()
 		err = exclusive.Check(*member, s.membersLocked())
 		s.mu.Unlock()

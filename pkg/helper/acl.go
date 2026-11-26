@@ -107,6 +107,14 @@ func socketSDDL(groupSID string) string {
 	return fmt.Sprintf("O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x%x;;;%s)", socketUse, groupSID)
 }
 
+// elevatedSocketSDDL is the approval socket's: SYSTEM and Administrators
+// only, no group. Reaching it takes an enabled Administrators SID in the
+// caller's token, which Windows gives a standard user only after the UAC
+// credential prompt (an unelevated administrator holds it deny-only).
+func elevatedSocketSDDL() string {
+	return "O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)"
+}
+
 // checkACL refuses a file, or a directory, that somebody other than SYSTEM
 // or the Administrators owns or may write. A nil DACL (dacl == nil, not an
 // empty one) grants everybody everything.

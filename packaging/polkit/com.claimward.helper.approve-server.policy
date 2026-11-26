@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  Install as /usr/share/polkit-1/actions/com.claimward.helper.approve-server.policy
+
+  The helper (root) asks polkit this before it trusts a VPN server that the
+  administrator's configuration does not name. auth_admin, not auth_admin_keep:
+  an administrator authenticates every time, and no grant is kept for the next.
+-->
+<policyconfig>
+  <vendor>Claimward</vendor>
+  <vendor_url>https://claimward.github.io</vendor_url>
+  <action id="com.claimward.helper.approve-server">
+    <description>Trust a VPN server</description>
+    <message>Authentication is required to trust a VPN server</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

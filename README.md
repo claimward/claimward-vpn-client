@@ -150,10 +150,11 @@ The helper runs as root (or SYSTEM). Any process that can reach its socket can
 make it act, so what it does is bounded by **its own** configuration, never by
 the request:
 
-- **It enrolls only with a server its configuration names.** A helper that
-  took the server from the request would let any local process point it at a
-  server of its own, answering with routes for `0.0.0.0/0`: every packet of
-  the machine, sent where that process chose.
+- **It enrolls only with a server that is trusted** — named in its
+  configuration, or approved (see [Server approval](#server-approval)). A
+  helper that took the server from the request would let any local process
+  point it at a server of its own, answering with routes for `0.0.0.0/0`:
+  every packet of the machine, sent where that process chose.
 - **It takes no tunnel configuration from a request.** The tunnel is what that
   server answered. The earlier `up` and `update-routes` actions, which took
   one, are gone.
@@ -191,6 +192,31 @@ platform; the Windows CI job applies them to real files and reads them back.
   "group": "claimward"
 }
 ```
+
+### Server approval
+
+`servers` is now optional: it is the administrator's **pre-approval**. Any
+other server is refused (`server_not_approved`, a `*helperclient.NotApprovedError`)
+until it is **approved**, and the helper obtains the consent itself — an app
+flag is never accepted as consent:
+
+| Platform | Consent the helper asks the system for |
+|---|---|
+| macOS | Authorization Services right `com.claimward.helper.approve-server`, rule `authenticate-admin-nonshared` (an administrator's name and password, every time). The app calls `macauth.Obtain(prompt)` and sends the 32-byte external form in `Approve`; the helper verifies it with `authd` and destroys it, so one token buys one approval |
+| Linux | polkit action `com.claimward.helper.approve-server` (`auth_admin`), asked of the system bus for the process behind the socket (`SO_PEERCRED` pid plus its start time). Install `packaging/polkit/com.claimward.helper.approve-server.policy` into `/usr/share/polkit-1/actions/` |
+| Windows | An elevated-only socket (`approve.sock`, DACL SYSTEM and Administrators): a standard user cannot connect without UAC elevation. The helper main serves it with `helper.ListenElevated` and `Server.ServeElevated` |
+
+Approved servers are kept in a root-owned file (`approvals` in `helper.json`;
+`/var/db/claimward/approved-servers.json` on macOS, `/var/lib/claimward/approved-servers.json`
+on Linux, `C:\ProgramData\Claimward\approved-servers.json` on Windows): the
+canonical URL and the SHA-256 of the server's discovery identity (name and
+identity providers). A server whose identity changes is refused
+(`server_identity_changed`) until it is approved again; deleting the file, or
+`Revoke`, forgets it at once. Without an `Authorizer` the helper refuses every
+approval.
+
+App API (`pkg/helperclient`): `Approve(url, authorization)`, `ApproveElevated(url)`,
+`Revoke(url)`, `Approved()`.
 
 A route watch (`pkg/routeclient`) carries the bearer token, so it runs over
 **TLS** except to a loopback address. Against a server whose gRPC is not TLS,
@@ -274,7 +300,7 @@ is: `appcore` and the helper both return `*exclusive.Error`, which names the
 blocking server. Sessions are stored per server (canonical URL + provider id),
 and requests carry `Claimward-Provider`.
 
-The helper's own `helper.json` takes `servers` (required), `group` (default
+The helper's own `helper.json` takes `servers` (optional pre-approval), `approvals` (the approved-servers file), `group` (default
 `admin` on macOS, `claimward` on Linux, `Claimward Users` on Windows) and
 `socket`.
 

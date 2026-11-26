@@ -35,6 +35,21 @@ const (
 	// names no key or tenant: the helper renews only the enrollment it made
 	// itself, with the server it made it with.
 	ActionRenew = "renew"
+	// ActionApprove asks the helper to trust the server ConnectSpec.ServerURL
+	// names. The helper reads the server's discovery document, then obtains a
+	// SYSTEM authorization itself (polkit on Linux; Authorization Services on
+	// macOS, from ConnectSpec.Authorization; a connection on the elevated
+	// socket on Windows) before it remembers the server. An app cannot
+	// approve by saying so: nothing in the request counts as consent but what
+	// the operating system vouches for.
+	ActionApprove = "approve"
+	// ActionRevoke makes the helper forget an approved server, and take its
+	// tunnel down. It only narrows what the helper trusts, so it needs no
+	// authorization. A server the administrator's configuration names cannot
+	// be revoked from here.
+	ActionRevoke = "revoke"
+	// ActionApproved lists the servers the helper trusts, as Response.Approved.
+	ActionApproved = "approved"
 )
 
 // Error codes a Response can carry beside its Error text.
@@ -46,6 +61,17 @@ const (
 	// document, so it could not tell whether the server is exclusive and
 	// refused (it fails closed).
 	ErrDiscovery = "discovery_failed"
+	// ErrNotApproved: the server is neither in the administrator's
+	// configuration nor approved. The app answers with ActionApprove, which
+	// asks the person for the system's consent, and tries again.
+	ErrNotApproved = "server_not_approved"
+	// ErrIdentityChanged: the server was approved, but what it now says it is
+	// (its name and identity providers) differs from what was approved. It
+	// must be approved again.
+	ErrIdentityChanged = "server_identity_changed"
+	// ErrApprovalDenied: the system's consent was refused, dismissed or
+	// unavailable.
+	ErrApprovalDenied = "approval_denied"
 )
 
 // Request is sent by the app to the helper.
@@ -67,6 +93,22 @@ type ConnectSpec struct {
 	// Tenant is the one chosen for this session; empty lets the server use
 	// the person's only one.
 	Tenant string `json:"tenant,omitempty"`
+	// Authorization is, with ActionApprove on macOS, the 32 bytes of an
+	// AuthorizationExternalForm the app obtained for the right
+	// "com.claimward.helper.approve-server". It is not a claim: the helper
+	// hands it to Authorization Services, which says whether the right was
+	// granted. Ignored on the other platforms.
+	Authorization []byte `json:"authorization,omitempty"`
+}
+
+// Approved is one server the helper trusts.
+type Approved struct {
+	ServerURL  string    `json:"server_url"`
+	ServerName string    `json:"server_name,omitempty"`
+	ApprovedAt time.Time `json:"approved_at,omitzero"`
+	// Admin: named in the administrator's configuration; it cannot be revoked
+	// through the socket.
+	Admin bool `json:"admin,omitempty"`
 }
 
 // Tenant is one the person may connect to.
@@ -104,6 +146,9 @@ type Response struct {
 	// Tunnels are the live tunnels, one per connected server.
 	Tunnels []Tunnel `json:"tunnels,omitempty"`
 	Tenants []Tenant `json:"tenants,omitempty"`
+	// Approved are the servers the helper trusts (ActionApproved, and the
+	// answer to ActionApprove and ActionRevoke).
+	Approved []Approved `json:"approved,omitempty"`
 	// LastErrors is, per server, why the helper last failed to keep its
 	// tunnel: a renewal the server refused, a re-enrollment that failed.
 	// Cleared by a successful connect to that server.

@@ -31,8 +31,11 @@ func TestTheConfigurationIsRootsAlone(t *testing.T) {
 	if _, err := LoadConfig(write("writable.json", `{"servers": ["https://vpn.example.org"]}`, 0o666)); err == nil {
 		t.Error("a configuration anybody may write was taken")
 	}
-	if _, err := LoadConfig(write("none.json", `{"servers": []}`, 0o644)); err == nil {
-		t.Error("a configuration naming no server was taken")
+	// Since approval exists, no pre-approved server is a valid choice: every
+	// server is then approved at the first use.
+	none, err := LoadConfig(write("none.json", `{"servers": []}`, 0o644))
+	if err != nil || len(none.Servers) != 0 || none.Approvals != DefaultApprovalsPath {
+		t.Errorf("a configuration naming no server: %+v %v", none, err)
 	}
 	if _, err := LoadConfig(write("bad.json", `{`, 0o644)); err == nil {
 		t.Error("a configuration that is not JSON was taken")

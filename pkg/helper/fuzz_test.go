@@ -26,7 +26,7 @@ func FuzzHelperRequest(f *testing.F) {
 		s := New(Config{}, "test", "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 		srv, cli := net.Pipe()
 		done := make(chan struct{})
-		go func() { s.handle(srv); close(done) }()
+		go func() { s.handle(srv, false); close(done) }()
 		go func() { _, _ = io.Copy(io.Discard, cli) }()
 		go func() { _, _ = cli.Write(data); cli.Close() }()
 		select {
