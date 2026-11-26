@@ -49,7 +49,8 @@ func TestWindowsAdapterName(t *testing.T) {
 	if strings.ContainsAny(odd, "\";\\/") {
 		t.Errorf("unsafe characters survive: %q", odd)
 	}
-	if got := windowsAdapterName(""); got == "Claimward  " || !strings.HasPrefix(got, "Claimward ") {
+	// No readable part: the name is "Claimward" and the 6 hex, nothing between.
+	if got := windowsAdapterName(""); len(got) != len("Claimward ")+6 || strings.Contains(got, "  ") {
 		t.Errorf("empty key: %q", got)
 	}
 }
