@@ -80,6 +80,50 @@ func (e *NotApprovedError) Error() string { return "helper: " + e.Message }
 // ErrApprovalDenied is Approve's refusal: the system's consent was not given.
 var ErrApprovalDenied = errors.New("approval denied")
 
+// RefusalError is a refusal by the helper that the client has no more specific
+// type for: the helper answered, and said no. Code is the helper's stable
+// hproto error_code ("" when it gave none, as an older helper does), so callers
+// tell refusals apart with errors.As and Code, never by matching Message, which
+// is for people and may be reworded.
+type RefusalError struct {
+	Code    string
+	Message string
+	cause   error
+}
+
+func (e *RefusalError) Error() string {
+	if e.cause != nil {
+		return e.cause.Error() + ": " + e.Message
+	}
+	return "helper: " + e.Message
+}
+
+// Unwrap lets errors.Is(err, ErrApprovalDenied) keep answering.
+func (e *RefusalError) Unwrap() error { return e.cause }
+
+// CodeOf is the helper's error_code behind err, of whatever type the client
+// gave the refusal (RefusalError, NotApprovedError, exclusive.Error), or "" for
+// an error that is not a helper refusal (no socket, a timeout) or that carried
+// no code.
+func CodeOf(err error) string {
+	var r *RefusalError
+	if errors.As(err, &r) {
+		return r.Code
+	}
+	var n *NotApprovedError
+	if errors.As(err, &n) {
+		if n.Changed {
+			return hproto.ErrIdentityChanged
+		}
+		return hproto.ErrNotApproved
+	}
+	var x *exclusive.Error
+	if errors.As(err, &x) {
+		return hproto.ErrExclusive
+	}
+	return ""
+}
+
 // approveTimeout covers the person's answer to the system's prompt.
 const approveTimeout = 4 * time.Minute
 
@@ -158,9 +202,9 @@ func (c *Client) callOn(path string, timeout time.Duration, req hproto.Request, 
 		case hproto.ErrNotApproved, hproto.ErrIdentityChanged:
 			return &resp, &NotApprovedError{Server: server, Changed: resp.ErrorCode == hproto.ErrIdentityChanged, Message: resp.Error}
 		case hproto.ErrApprovalDenied:
-			return &resp, fmt.Errorf("%w: %s", ErrApprovalDenied, resp.Error)
+			return &resp, &RefusalError{Code: resp.ErrorCode, Message: resp.Error, cause: ErrApprovalDenied}
 		}
-		return &resp, fmt.Errorf("helper: %s", resp.Error)
+		return &resp, &RefusalError{Code: resp.ErrorCode, Message: resp.Error}
 	}
 	return &resp, nil
 }
