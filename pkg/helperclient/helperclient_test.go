@@ -187,3 +187,32 @@ func TestAvailableAndUnreachable(t *testing.T) {
 		t.Errorf("unreachable: %v", err)
 	}
 }
+
+// A helper that hangs up before reading a request larger than the socket's
+// buffer: the failure is the sending, and is said so.
+func TestASendThatFailsIsReportedAsSuch(t *testing.T) {
+	dir, derr := os.MkdirTemp("", "hcl")
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := filepath.Join(dir, "h.sock")
+	ln, lerr := net.Listen("unix", path)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	_, err := (&Client{SocketPath: path}).Connect(hproto.ConnectSpec{ServerURL: "https://a", Bearer: strings.Repeat("x", 8<<20)})
+	if err == nil || !strings.Contains(err.Error(), "send request") {
+		t.Errorf("%v", err)
+	}
+}
