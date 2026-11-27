@@ -58,4 +58,13 @@ func TestDefaultPeerSourceReadsTheKernelsCredentials(t *testing.T) {
 	if _, err := DefaultPeerSource(&net.TCPConn{}); err == nil {
 		t.Error("a TCP connection was identified")
 	}
+	// A connection that cannot be asked, or that is already closed, is an
+	// error, never an identity (an empty one would be the unidentified caller).
+	if p, err := DefaultPeerSource(&net.UnixConn{}); err == nil {
+		t.Errorf("a zero connection was identified as %+v", p)
+	}
+	srv.Close()
+	if p, err := DefaultPeerSource(srv); err == nil {
+		t.Errorf("a closed connection was identified as %+v", p)
+	}
 }

@@ -153,6 +153,51 @@ func TestAnotherUsersTunnelIsNotRenewedReplacedOrRevoked(t *testing.T) {
 	}
 }
 
+// A refused connect asks the server nothing: no enrollment is made and then
+// given back.
+func TestRefusedConnectOverAnotherUsersTunnelAsksTheServerNothing(t *testing.T) {
+	s, a, _ := twoUsers(t)
+	before := a.count(func(v *leaseServer) int { return len(v.enrolled) })
+	spec, _ := connectSpec(t, a.URL)
+	if r := s.connectAs(bob, spec); r.ErrorCode != hproto.ErrNotOwner {
+		t.Fatalf("%+v", r)
+	}
+	if n := a.count(func(v *leaseServer) int { return len(v.enrolled) }); n != before {
+		t.Errorf("the server was asked to enroll %d more time(s)", n-before)
+	}
+	if n := a.count(func(v *leaseServer) int { return len(v.deregisters) }); n != 0 {
+		t.Errorf("%d deregistration(s)", n)
+	}
+}
+
+// Another user may connect to the server while this one's enrollment is in
+// flight: the check is made again under the lock, and the enrollment just
+// made is given back.
+func TestAConnectRacedByAnotherUsersIsRefusedAndGivenBack(t *testing.T) {
+	a := newLeaseServer(t)
+	s, _ := leasedHelper(t, a.URL)
+	describe(s, map[string]*protocol.Configuration{a.URL: plain("A")})
+	a.set(func(v *leaseServer) {
+		v.onEnroll = func() {
+			v.set(func(v *leaseServer) { v.onEnroll = nil })
+			spec, _ := connectSpec(t, a.URL)
+			if r := s.connectAs(alice, spec); !r.OK {
+				t.Error(r.Error)
+			}
+		}
+	})
+	spec, _ := connectSpec(t, a.URL)
+	if r := s.connectAs(bob, spec); r.OK || r.ErrorCode != hproto.ErrNotOwner {
+		t.Fatalf("bob: %+v", r)
+	}
+	if got := urls(s.statusFor(alice)); len(got) != 1 {
+		t.Errorf("alice lost her tunnel: %v", got)
+	}
+	if n := a.count(func(v *leaseServer) int { return len(v.deregisters) }); n != 1 {
+		t.Errorf("%d deregistrations, want bob's enrollment given back", n)
+	}
+}
+
 // The wire: the caller is the credentials source's answer for THAT connection,
 // and no field of the request can say otherwise.
 func TestStatusOverTheSocketIsFilteredByTheConnectionsCredentials(t *testing.T) {
