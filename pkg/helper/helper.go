@@ -312,9 +312,17 @@ func (s *Server) handle(conn net.Conn, elevated bool) {
 	// Who is asking is read from the kernel, never from the request; a caller
 	// the system cannot identify is refused rather than guessed at.
 	peer, err := s.peers(conn)
+	if err == nil && peer.ID == "" && !elevated {
+		// A source that answers without an identity is no identity: such
+		// callers would share one pool, so it fails closed as an error does.
+		err = errors.New("the system gave no identity")
+	}
 	if err != nil {
 		s.log.Warn("cannot identify the caller", "err", err)
-		reply(conn, hproto.Response{Error: "cannot identify the caller: " + err.Error()})
+		reply(conn, hproto.Response{
+			Error:     "cannot identify the caller: " + err.Error(),
+			ErrorCode: hproto.ErrCallerUnidentified,
+		})
 		return
 	}
 	if elevated {

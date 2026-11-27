@@ -268,8 +268,9 @@ tunnel another user holds are refused with `error_code` `tunnel_not_owned`.
 root (on Windows SYSTEM, an elevated Administrator, or any caller of the
 elevated socket) sees and does all. The wire format is unchanged. Where the
 system cannot say who is calling (a Windows without
-`SIO_AF_UNIX_GETPEERPID`, a platform with no peer-credential call) the caller
-is unidentified and sees only tunnels unidentified callers connected.
+`SIO_AF_UNIX_GETPEERPID`, a platform with no peer-credential call) the request
+is refused, whatever its action, with `error_code` `caller_not_identified`
+(since v0.12.2; v0.12.1 pooled such callers). The helper fails closed.
 
 ## Tenants
 

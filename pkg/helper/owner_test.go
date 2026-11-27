@@ -230,19 +230,37 @@ func TestStatusOverTheSocketIsFilteredByTheConnectionsCredentials(t *testing.T) 
 	}
 }
 
+// Fail closed: a caller the system cannot identify is refused for every
+// action, with a code that names the reason, whether the source says so with an
+// error or answers with no identity. It never joins a pool of such callers.
 func TestACallerTheSystemCannotIdentifyIsRefused(t *testing.T) {
-	s, _, _ := twoUsers(t)
-	client, server := net.Pipe()
-	defer client.Close()
-	s.UsePeerCredentials(func(net.Conn) (Peer, error) { return Peer{}, net.ErrClosed })
-	go s.handle(server, false)
-	_, _ = client.Write([]byte(`{"action":"status"}`))
-	var r hproto.Response
-	if err := json.NewDecoder(client).Decode(&r); err != nil {
-		t.Fatal(err)
+	sources := map[string]PeerSource{
+		"error":       func(net.Conn) (Peer, error) { return Peer{}, net.ErrClosed },
+		"no identity": func(net.Conn) (Peer, error) { return Peer{}, nil },
+		"admin flag but no identity": func(net.Conn) (Peer, error) {
+			return Peer{Admin: true}, nil
+		},
 	}
-	if r.OK || len(r.Tunnels) != 0 || !strings.Contains(r.Error, "cannot identify") {
-		t.Errorf("%+v", r)
+	for name, src := range sources {
+		for _, action := range []string{"connect", "down", "status"} {
+			s, _, _ := twoUsers(t)
+			client, server := net.Pipe()
+			s.UsePeerCredentials(src)
+			go s.handle(server, false)
+			_, _ = client.Write([]byte(`{"action":"` + action + `"}`))
+			var r hproto.Response
+			if err := json.NewDecoder(client).Decode(&r); err != nil {
+				t.Fatal(err)
+			}
+			client.Close()
+			if r.OK || len(r.Tunnels) != 0 || r.ErrorCode != hproto.ErrCallerUnidentified ||
+				!strings.Contains(r.Error, "cannot identify") {
+				t.Errorf("%s / %s: %+v", name, action, r)
+			}
+			if got := urls(s.statusFor(admin)); len(got) != 2 {
+				t.Errorf("%s / %s changed the tunnels: %v", name, action, got)
+			}
+		}
 	}
 }
 

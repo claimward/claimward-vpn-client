@@ -77,6 +77,11 @@ const (
 	// them), and only that user, or root/an administrator, may disconnect,
 	// renew or replace it.
 	ErrNotOwner = "tunnel_not_owned"
+	// ErrCallerUnidentified: the operating system could not say who is on the
+	// other end of the connection (the peer-credential call failed or is not
+	// available), so nothing is connected, disconnected or listed for it. Since
+	// v0.12.2 the helper fails closed here instead of pooling such callers.
+	ErrCallerUnidentified = "caller_not_identified"
 )
 
 // Request is sent by the app to the helper.
