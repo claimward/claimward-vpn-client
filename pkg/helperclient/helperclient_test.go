@@ -124,3 +124,45 @@ func TestNoCodeAndNotARefusal(t *testing.T) {
 		t.Error("CodeOf(nil)")
 	}
 }
+
+// The wording of each failure that is not a refusal, and of ErrApprovalDenied's.
+func TestTransportFailuresAndWording(t *testing.T) {
+	c := fakeHelper(t, hproto.Response{Error: "why", ErrorCode: hproto.ErrApprovalDenied})
+	_, err := c.Approve("https://a", nil)
+	if err == nil || err.Error() != "approval denied: why" {
+		t.Errorf("approval denied text: %v", err)
+	}
+	// A helper that hangs up without answering.
+	dir, derr := os.MkdirTemp("", "hcl")
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := filepath.Join(dir, "h.sock")
+	ln, lerr := net.Listen("unix", path)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	if _, err := (&Client{SocketPath: path}).Status(); err == nil || CodeOf(err) != "" {
+		t.Errorf("a helper that hung up: %v", err)
+	}
+	if _, err := (&Client{SocketPath: filepath.Join(dir, "none.sock")}).Status(); err == nil {
+		t.Error("an unreachable helper answered")
+	}
+	// No elevated socket on this platform: an error, not a connection to "".
+	if hproto.DefaultElevatedSocketPath == "" {
+		if _, err := (&Client{SocketPath: path}).ApproveElevated("https://a"); err == nil || err.Error() != "this platform has no elevated socket" {
+			t.Errorf("elevated: %v", err)
+		}
+	}
+}
