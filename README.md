@@ -259,6 +259,18 @@ device itself (the WireGuard UAPI `get`), so a roaming endpoint or a route push
 shows at once; they reach `appcore.ServerStatus` and `appvm.State.Tunnel` (and
 each `ServerRow.Tunnel`), which a detail panel can poll every second.
 
+**Whose tunnels.** A tunnel belongs to the user that connected it, as the
+operating system identifies the connection (Linux `SO_PEERCRED`, macOS/FreeBSD
+`LOCAL_PEERCRED`: the uid; Windows: the SID of the caller's process token),
+never as the request says. `status` lists only the caller's tunnels (and their
+`last_errors`); `down`, `renew`, `revoke` and a `connect` that would replace a
+tunnel another user holds are refused with `error_code` `tunnel_not_owned`.
+root (on Windows SYSTEM, an elevated Administrator, or any caller of the
+elevated socket) sees and does all. The wire format is unchanged. Where the
+system cannot say who is calling (a Windows without
+`SIO_AF_UNIX_GETPEERPID`, a platform with no peer-credential call) the caller
+is unidentified and sees only tunnels unidentified callers connected.
+
 ## Tenants
 
 A person may belong to several tenants and chooses one per session.

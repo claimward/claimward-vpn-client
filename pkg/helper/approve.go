@@ -68,7 +68,11 @@ func (s *Server) approve(conn net.Conn, elevated bool, spec *hproto.ConnectSpec)
 }
 
 // revoke is ActionRevoke: forget an approved server and take down its tunnel.
-func (s *Server) revoke(spec *hproto.ConnectSpec) hproto.Response {
+//
+// ⛔ Taking down a tunnel is a disconnect: another user's tunnel is not the
+// caller's to take down, so a revocation that would do it is refused (an
+// administrator may).
+func (s *Server) revokeAs(p Peer, spec *hproto.ConnectSpec) hproto.Response {
 	if spec == nil || spec.ServerURL == "" {
 		return hproto.Response{Error: "missing server"}
 	}
@@ -76,6 +80,12 @@ func (s *Server) revoke(spec *hproto.ConnectSpec) hproto.Response {
 	if err != nil {
 		return hproto.Response{Error: fmt.Sprintf("server %q: %v", spec.ServerURL, err)}
 	}
+	s.mu.Lock()
+	if cur := s.sessions[server]; cur != nil && !p.sees(cur.owner) {
+		s.mu.Unlock()
+		return notOwner()
+	}
+	s.mu.Unlock()
 	if s.adminServer(server) {
 		return hproto.Response{Error: fmt.Sprintf("server %q is approved by the administrator's configuration; remove it there", spec.ServerURL)}
 	}
@@ -84,7 +94,7 @@ func (s *Server) revoke(spec *hproto.ConnectSpec) hproto.Response {
 	}
 	s.mu.Lock()
 	old := s.stopLocked(server)
-	delete(s.lastErrs, server)
+	s.clearErrLocked(server)
 	s.mu.Unlock()
 	if old != nil {
 		s.deregister(old)

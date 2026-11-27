@@ -72,6 +72,11 @@ const (
 	// ErrApprovalDenied: the system's consent was refused, dismissed or
 	// unavailable.
 	ErrApprovalDenied = "approval_denied"
+	// ErrNotOwner: the tunnel to that server belongs to another user of the
+	// machine (the one that connected it, as the operating system identified
+	// them), and only that user, or root/an administrator, may disconnect,
+	// renew or replace it.
+	ErrNotOwner = "tunnel_not_owned"
 )
 
 // Request is sent by the app to the helper.
