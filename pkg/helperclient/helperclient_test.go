@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -183,8 +184,12 @@ func TestAvailableAndUnreachable(t *testing.T) {
 		t.Error("a missing socket is available")
 	}
 	_, err := gone.Status()
-	if err == nil || !strings.Contains(err.Error(), "helper not reachable") || !errors.Is(err, os.ErrNotExist) {
+	if err == nil || !strings.Contains(err.Error(), "helper not reachable") {
 		t.Errorf("unreachable: %v", err)
+	}
+	// Windows reports a refused connection, not a missing file.
+	if err != nil && runtime.GOOS != "windows" && !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("unreachable is not ErrNotExist: %v", err)
 	}
 }
 
@@ -212,7 +217,8 @@ func TestASendThatFailsIsReportedAsSuch(t *testing.T) {
 		}
 	}()
 	_, err := (&Client{SocketPath: path}).Connect(hproto.ConnectSpec{ServerURL: "https://a", Bearer: strings.Repeat("x", 8<<20)})
-	if err == nil || !strings.Contains(err.Error(), "send request") {
+	// Windows lets the send complete and fails on the read instead.
+	if err == nil || !(strings.Contains(err.Error(), "send request") || (runtime.GOOS == "windows" && strings.Contains(err.Error(), "read response"))) {
 		t.Errorf("%v", err)
 	}
 }
