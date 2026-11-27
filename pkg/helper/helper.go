@@ -15,6 +15,11 @@
 //   - It holds one tunnel per server, and applies the exclusivity rule
 //     (pkg/exclusive) itself, from the discovery document it fetched: it does
 //     not take the app's word for whether a server is exclusive.
+//   - A tunnel belongs to the user that connected it, as the operating system
+//     identifies them on the connection (peer.go), never as the request says:
+//     status lists only the caller's tunnels, and disconnecting, renewing or
+//     replacing another user's is refused. root (an administrator on
+//     Windows) sees and does all.
 //   - Its socket is 0660, for root and one group (listen_unix.go); the
 //     previous helper's was 0666.
 package helper
@@ -140,6 +145,22 @@ type Server struct {
 	// lastErrs is, per server, why its tunnel was last lost or its renewal
 	// last failed.
 	lastErrs map[string]string
+	// errOwners is, per server in lastErrs, whose tunnel the error is about:
+	// status shows an error to its owner (and to an administrator) alone.
+	errOwners map[string]string
+	// peers identifies who is on the other end of a connection.
+	peers PeerSource
+}
+
+// setErrLocked records why server's tunnel of owner was lost or not renewed.
+func (s *Server) setErrLocked(server, owner, why string) {
+	s.lastErrs[server] = why
+	s.errOwners[server] = owner
+}
+
+func (s *Server) clearErrLocked(server string) {
+	delete(s.lastErrs, server)
+	delete(s.errOwners, server)
 }
 
 // superseded is a re-enrollment that found a newer session, or none.
@@ -150,7 +171,10 @@ type session struct {
 	gen    uint64
 	server string
 	// member is the server as discovery described it when it was connected.
-	member   exclusive.Member
+	member exclusive.Member
+	// owner is the Peer.ID that connected it, from the kernel's credentials of
+	// that connection; it is kept through the renewals and re-enrollments.
+	owner    string
 	spec     hproto.ConnectSpec // Bearer is replaced by ActionRenew
 	pub      wgtypes.Key
 	tun      Tunnel
@@ -204,6 +228,8 @@ func New(cfg Config, os, platform string, log *slog.Logger) *Server {
 		retryAfter:    time.Minute,
 		sessions:      map[string]*session{},
 		lastErrs:      map[string]string{},
+		errOwners:     map[string]string{},
+		peers:         DefaultPeerSource,
 	}
 }
 
@@ -283,23 +309,34 @@ func (s *Server) handle(conn net.Conn, elevated bool) {
 		reply(conn, hproto.Response{Error: "bad request: " + err.Error()})
 		return
 	}
+	// Who is asking is read from the kernel, never from the request; a caller
+	// the system cannot identify is refused rather than guessed at.
+	peer, err := s.peers(conn)
+	if err != nil {
+		s.log.Warn("cannot identify the caller", "err", err)
+		reply(conn, hproto.Response{Error: "cannot identify the caller: " + err.Error()})
+		return
+	}
+	if elevated {
+		peer.Admin = true
+	}
 	switch req.Action {
 	case hproto.ActionConnect:
-		reply(conn, s.connect(req.Connect))
+		reply(conn, s.connectAs(peer, req.Connect))
 	case hproto.ActionTenants:
 		reply(conn, s.tenants(req.Connect))
 	case hproto.ActionRenew:
-		reply(conn, s.renewNow(req.Connect))
+		reply(conn, s.renewAs(peer, req.Connect))
 	case hproto.ActionDown:
-		reply(conn, s.down(req.Connect))
+		reply(conn, s.downAs(peer, req.Connect))
 	case hproto.ActionStatus:
-		reply(conn, s.status())
+		reply(conn, s.statusFor(peer))
 	case hproto.ActionApprove:
 		// Asking the person takes as long as the person does.
 		_ = conn.SetDeadline(time.Now().Add(approveTimeout + 30*time.Second))
 		reply(conn, s.approve(conn, elevated, req.Connect))
 	case hproto.ActionRevoke:
-		reply(conn, s.revoke(req.Connect))
+		reply(conn, s.revokeAs(peer, req.Connect))
 	case hproto.ActionApproved:
 		reply(conn, s.approvedList())
 	default:
@@ -402,8 +439,16 @@ func (s *Server) tenants(spec *hproto.ConnectSpec) hproto.Response {
 	return out
 }
 
-func (s *Server) connect(spec *hproto.ConnectSpec) hproto.Response {
-	return s.enroll(spec, 0, nil)
+func (s *Server) connectAs(p Peer, spec *hproto.ConnectSpec) hproto.Response {
+	return s.enrollAs(p, spec, 0, nil)
+}
+
+// notOwner is the refusal to act on a tunnel another user connected.
+func notOwner() hproto.Response {
+	return hproto.Response{
+		Error:     "that tunnel belongs to another user of this machine",
+		ErrorCode: hproto.ErrNotOwner,
+	}
 }
 
 // membersLocked are the servers with a live tunnel.
@@ -420,13 +465,18 @@ func refusal(err *exclusive.Error) hproto.Response {
 	return hproto.Response{Error: err.Error(), ErrorCode: hproto.ErrExclusive, BlockedBy: err.BlockedBy()}
 }
 
-// enroll enrolls with the server spec names, brings the tunnel up from its
+// enrollAs enrolls with the server spec names, brings the tunnel up from its
 // answer and starts renewing the lease. A non-zero gen is a re-enrollment
 // by that session's renewal loop (member is then the session's own), which
 // gives way to anything that happened since (a disconnect, another connect).
 // A first connection (gen 0) reads the server's discovery document and is
 // refused if the server, or one already connected, is exclusive.
-func (s *Server) enroll(spec *hproto.ConnectSpec, gen uint64, member *exclusive.Member) hproto.Response {
+//
+// ⛔ The tunnel belongs to p, who is read from the kernel: a first connection
+// to a server another user holds a tunnel to is refused (it would replace
+// their tunnel) unless p is an administrator; a re-enrollment keeps the
+// session's owner.
+func (s *Server) enrollAs(p Peer, spec *hproto.ConnectSpec, gen uint64, member *exclusive.Member) hproto.Response {
 	if err := checkSpec(spec); err != nil {
 		return hproto.Response{Error: err.Error()}
 	}
@@ -449,6 +499,10 @@ func (s *Server) enroll(spec *hproto.ConnectSpec, gen uint64, member *exclusive.
 	if member == nil {
 		member = &exclusive.Member{URL: server, Name: doc.ServerName, Exclusive: doc.Exclusive}
 		s.mu.Lock()
+		if cur := s.sessions[server]; cur != nil && !p.sees(cur.owner) {
+			s.mu.Unlock()
+			return notOwner() // before anything is asked of the server
+		}
 		err = exclusive.Check(*member, s.membersLocked())
 		s.mu.Unlock()
 		if ex := (*exclusive.Error)(nil); errors.As(err, &ex) {
@@ -485,6 +539,11 @@ func (s *Server) enroll(spec *hproto.ConnectSpec, gen uint64, member *exclusive.
 	if gen == 0 {
 		// The authoritative check: another connection may have been made
 		// since the first one.
+		if cur != nil && !p.sees(cur.owner) {
+			s.mu.Unlock()
+			s.deregister(&session{server: server, spec: *spec, pub: pair.Public})
+			return notOwner()
+		}
 		if err := exclusive.Check(*member, s.membersLocked()); err != nil {
 			s.mu.Unlock()
 			s.deregister(&session{server: server, spec: *spec, pub: pair.Public})
@@ -500,21 +559,22 @@ func (s *Server) enroll(spec *hproto.ConnectSpec, gen uint64, member *exclusive.
 		// The previous enrollment is somebody else's lease now: give it back.
 		go s.deregister(old)
 	}
+	owner := p.ID
 	tun, err := s.up(cfg)
 	if err != nil {
-		s.lastErrs[server] = err.Error()
+		s.setErrLocked(server, owner, err.Error())
 		s.mu.Unlock()
 		return hproto.Response{Error: err.Error()}
 	}
 	s.gen++
 	sctx, scancel := context.WithCancel(context.Background())
 	sess := &session{
-		gen: s.gen, server: server, member: *member, spec: *spec, pub: pair.Public,
+		gen: s.gen, server: server, owner: owner, member: *member, spec: *spec, pub: pair.Public,
 		tun: tun, cfg: cfg, assigned: resp.AssignedIP, wake: make(chan struct{}, 1), cancel: scancel,
 	}
 	s.setLeaseLocked(sess, resp.LeaseExpiresAt)
 	s.sessions[server] = sess
-	delete(s.lastErrs, server)
+	s.clearErrLocked(server)
 	s.mu.Unlock()
 
 	go s.renewLoop(sctx, sess)
@@ -522,7 +582,7 @@ func (s *Server) enroll(spec *hproto.ConnectSpec, gen uint64, member *exclusive.
 		go s.watchRoutes(sctx, sess, resp.GRPCEndpoint)
 	}
 	s.log.Info("connected", "server", server, "interface", tun.Name(), "assigned", resp.AssignedIP, "tenant", spec.Tenant, "routes", resp.AllowedIPs, "lease", resp.LeaseExpiresAt)
-	return s.status()
+	return s.statusFor(p)
 }
 
 func (s *Server) watchRoutes(ctx context.Context, sess *session, endpoint string) {
@@ -605,7 +665,7 @@ func (s *Server) renew(ctx context.Context, sess *session) bool {
 		s.mu.Lock()
 		s.setLeaseLocked(sess, resp.LeaseExpiresAt)
 		if s.sessions[sess.server] == sess {
-			delete(s.lastErrs, sess.server)
+			s.clearErrLocked(sess.server)
 		}
 		s.mu.Unlock()
 		s.log.Info("lease renewed", "server", sess.server, "until", resp.LeaseExpiresAt)
@@ -620,7 +680,7 @@ func (s *Server) renew(ctx context.Context, sess *session) bool {
 		spec := sess.spec
 		member := sess.member
 		s.mu.Unlock()
-		if r := s.enroll(&spec, sess.gen, &member); !r.OK && r.Error != superseded {
+		if r := s.enrollAs(Peer{ID: sess.owner}, &spec, sess.gen, &member); !r.OK && r.Error != superseded {
 			s.drop(sess, "re-enrollment failed: "+r.Error)
 		}
 		return false
@@ -635,7 +695,7 @@ func (s *Server) renew(ctx context.Context, sess *session) bool {
 		// Unreachable, a 5xx, or a bearer that expired (401): retry, sooner
 		// than the lease ends.
 		s.mu.Lock()
-		s.lastErrs[sess.server] = "renewal failed: " + err.Error()
+		s.setErrLocked(sess.server, sess.owner, "renewal failed: "+err.Error())
 		left := time.Until(sess.lease)
 		if sess.lease.IsZero() {
 			left = s.retryAfter * 2
@@ -656,13 +716,14 @@ func (s *Server) drop(sess *session, why string) {
 		return
 	}
 	s.stopLocked(sess.server)
-	s.lastErrs[sess.server] = why
+	s.setErrLocked(sess.server, sess.owner, why)
 	s.log.Error("tunnel taken down", "server", sess.server, "why", why)
 }
 
 // renewNow is ActionRenew: a fresh bearer for the live session of the server
-// spec names, and a renewal with it now.
-func (s *Server) renewNow(spec *hproto.ConnectSpec) hproto.Response {
+// spec names, and a renewal with it now. Another user's tunnel is refused: a
+// bearer of the caller's would replace the owner's.
+func (s *Server) renewAs(p Peer, spec *hproto.ConnectSpec) hproto.Response {
 	if spec == nil || spec.Bearer == "" {
 		return hproto.Response{Error: "missing bearer"}
 	}
@@ -676,43 +737,62 @@ func (s *Server) renewNow(spec *hproto.ConnectSpec) hproto.Response {
 		s.mu.Unlock()
 		return hproto.Response{Error: "not connected"}
 	}
+	if !p.sees(sess.owner) {
+		s.mu.Unlock()
+		return notOwner()
+	}
 	sess.spec.Bearer = spec.Bearer
 	s.mu.Unlock()
 	s.renew(context.Background(), sess)
 	// Whatever renew did -- renewed, retried, re-enrolled, dropped -- the
 	// status says where that left the tunnel, and LastErrors why not.
-	st := s.status()
+	st := s.statusFor(p)
 	if e := st.LastErrors[server]; e != "" {
 		st.OK, st.Error = false, e
 	}
 	return st
 }
 
-// down is ActionDown: one server's tunnel, or all of them when none is named.
-func (s *Server) down(spec *hproto.ConnectSpec) hproto.Response {
+// down is ActionDown: one server's tunnel, or all of the caller's when none is
+// named. ⛔ Never another user's: naming a server whose tunnel another user
+// holds is refused, and "all" is all of the caller's own (an administrator's
+// is all of them).
+func (s *Server) downAs(p Peer, spec *hproto.ConnectSpec) hproto.Response {
 	var olds []*session
 	s.mu.Lock()
 	if spec == nil || spec.ServerURL == "" {
 		for _, server := range slices.Sorted(maps.Keys(s.sessions)) {
-			olds = append(olds, s.stopLocked(server))
+			if p.sees(s.sessions[server].owner) {
+				olds = append(olds, s.stopLocked(server))
+			}
 		}
-		clear(s.lastErrs)
+		for server := range maps.Clone(s.lastErrs) {
+			if p.sees(s.errOwners[server]) {
+				s.clearErrLocked(server)
+			}
+		}
 	} else {
 		server, err := secureurl.Canonical(spec.ServerURL)
 		if err != nil {
 			s.mu.Unlock()
 			return hproto.Response{Error: "server: " + err.Error()}
 		}
+		if cur := s.sessions[server]; cur != nil && !p.sees(cur.owner) {
+			s.mu.Unlock()
+			return notOwner()
+		}
 		if old := s.stopLocked(server); old != nil {
 			olds = append(olds, old)
 		}
-		delete(s.lastErrs, server)
+		if owner, ok := s.errOwners[server]; ok && p.sees(owner) {
+			s.clearErrLocked(server)
+		}
 	}
 	s.mu.Unlock()
 	for _, old := range olds {
 		s.deregister(old)
 	}
-	return s.status()
+	return s.statusFor(p)
 }
 
 // deregister gives the peer's address back to the server, rather than leave
@@ -740,11 +820,13 @@ func (s *Server) stopLocked(server string) *session {
 	return old
 }
 
-// status is read-only. It answers whoever may use the helper's socket, as
-// ActionStatus always has: every live tunnel of the machine is listed -- there
-// is one set of tunnels, not one per user -- with what is configured and the
-// device's counters. No key, bearer or other secret is among it.
-func (s *Server) status() hproto.Response {
+// statusFor is read-only. ⛔ It lists the tunnels p owns -- with what is
+// configured and the device's counters -- and no other user's: the endpoint,
+// routes, address and traffic of a tunnel are its owner's business, and the
+// socket is shared by every member of the group. Root (an administrator on
+// Windows) sees them all; Peer.sees is the rule. LastErrors is filtered the
+// same way. No key, bearer or other secret is among it.
+func (s *Server) statusFor(p Peer) hproto.Response {
 	s.mu.Lock()
 	resp := hproto.Response{OK: true}
 	type live struct {
@@ -754,6 +836,9 @@ func (s *Server) status() hproto.Response {
 	var lives []live
 	for _, server := range slices.Sorted(maps.Keys(s.sessions)) {
 		sess := s.sessions[server]
+		if !p.sees(sess.owner) {
+			continue
+		}
 		t := hproto.Tunnel{
 			ServerURL: server, ServerName: sess.member.Name, Exclusive: sess.member.Exclusive,
 			Interface: sess.tun.Name(), AssignedIP: sess.assigned, Tenant: sess.spec.Tenant,
@@ -767,8 +852,13 @@ func (s *Server) status() hproto.Response {
 		lives = append(lives, live{sess.tun, len(resp.Tunnels)})
 		resp.Tunnels = append(resp.Tunnels, t)
 	}
-	if len(s.lastErrs) > 0 {
-		resp.LastErrors = maps.Clone(s.lastErrs)
+	for server, why := range s.lastErrs {
+		if p.sees(s.errOwners[server]) {
+			if resp.LastErrors == nil {
+				resp.LastErrors = map[string]string{}
+			}
+			resp.LastErrors[server] = why
+		}
 	}
 	s.mu.Unlock()
 	// The device is asked outside the lock: a status poll must not hold up a
