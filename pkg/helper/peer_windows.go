@@ -15,8 +15,9 @@ import (
 // (_WSAIOR(IOC_VENDOR, 256)): WSAIoctl on a connected AF_UNIX socket, output a
 // ULONG, the peer's process id. The control code is not on the Winsock IOCTL
 // page of learn.microsoft.com; a Windows that does not know it answers
-// WSAEINVAL or WSAEOPNOTSUPP, and the caller is then unidentified (Peer.ID
-// empty), as on any platform that cannot ask.
+// WSAEINVAL or WSAEOPNOTSUPP, and the caller is then refused (since v0.12.2
+// the helper fails closed: an error, never a shared pool of unidentified
+// callers).
 const sioAFUnixGetPeerPID = 0x58000100
 
 // DefaultPeerSource identifies the caller from its process: the peer's pid
@@ -43,7 +44,8 @@ func DefaultPeerSource(c net.Conn) (Peer, error) {
 	}
 	if ierr != nil {
 		if errors.Is(ierr, windows.WSAEINVAL) || errors.Is(ierr, windows.WSAEOPNOTSUPP) {
-			return Peer{}, nil
+			// Fail closed: a caller nobody can name is refused, never pooled.
+			return Peer{}, fmt.Errorf("SIO_AF_UNIX_GETPEERPID is not supported: %w", ierr)
 		}
 		return Peer{}, fmt.Errorf("SIO_AF_UNIX_GETPEERPID: %w", ierr)
 	}

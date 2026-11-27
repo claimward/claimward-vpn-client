@@ -10,9 +10,9 @@ import "net"
 // acts on all of them. Nothing in hproto.Request takes part.
 type Peer struct {
 	// ID is the caller's identity: "uid:<n>" on Unix (SO_PEERCRED,
-	// LOCAL_PEERCRED), the token user's SID on Windows. Empty is a caller the
-	// system would not identify (a platform with no way to ask): it owns, and
-	// sees, the tunnels of the unidentified alone, never an identified user's.
+	// LOCAL_PEERCRED), the token user's SID on Windows. A caller the system
+	// cannot identify is refused by the server (hproto.ErrCallerUnidentified),
+	// never given an empty ID that would pool it with others.
 	ID string
 	// Admin is root (uid 0) on Unix, SYSTEM or an elevated Administrator on
 	// Windows, or any caller of the elevated socket.

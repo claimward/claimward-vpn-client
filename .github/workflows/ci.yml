@@ -117,6 +117,25 @@ jobs:
           sudo CLAIMWARD_TUN_TEST=1 ./wgtun.test -test.run 'LinuxTunnels' -test.v | tee tun.txt
           if grep -q -- '--- SKIP' tun.txt; then echo 'the tunnel test was skipped'; exit 1; fi
 
+  # LOCAL_PEERCRED (who is on the other end of the helper's socket) is read
+  # from a real macOS kernel, where the helper's tests also run in full.
+  macos:
+    name: macos (peer credentials)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.4'
+      - run: go vet ./pkg/helper
+      - name: Peer tests (a skip is a failure here)
+        shell: bash
+        run: |
+          go test -count=1 -v -run 'DefaultPeerSource|Owner|Unidentified|CannotIdentify|Elevated|Status' ./pkg/helper | tee peer.txt
+          if grep -q -e '--- SKIP' peer.txt; then echo 'a peer test was skipped'; exit 1; fi
+          grep -q -e '--- PASS: TestDefaultPeerSourceReadsTheKernelsCredentials' peer.txt
+      - run: go test -count=1 ./pkg/helper
+
   # The Windows parts run on Windows: the helper's ACLs set and read back
   # through the file system, and a real Wintun adapter brought up and its
   # address, routes, DNS and MTU read back from the IP Helper API. The
