@@ -251,6 +251,14 @@ does not, so one restarted by its service manager finds the lease still
 there. The helper's `status` reports the lease (`lease_expires_at`) and why it
 last failed to keep the tunnel (`last_error`).
 
+Each tunnel in `status` also carries its live facts, read-only and with no
+key among them: the peer's `endpoint`, the `allowed_ips` routed into it, the
+`dns` servers, the `mtu`, the `rx_bytes` and `tx_bytes` the device counts and
+the `last_handshake` (absent until there has been one). They come from the
+device itself (the WireGuard UAPI `get`), so a roaming endpoint or a route push
+shows at once; they reach `appcore.ServerStatus` and `appvm.State.Tunnel` (and
+each `ServerRow.Tunnel`), which a detail panel can poll every second.
+
 ## Tenants
 
 A person may belong to several tenants and chooses one per session.

@@ -177,6 +177,18 @@ type ServerStatus struct {
 
 	Interface  string `json:"interface,omitempty"`
 	AssignedIP string `json:"assigned_ip,omitempty"`
+	// What follows is set while Connected, from the helper's read-only status
+	// of the tunnel: the peer's Endpoint, the AllowedIPs routed into the
+	// tunnel, the DNS servers and MTU, what the device has received (RxBytes)
+	// and sent (TxBytes) and when it last completed a handshake with the peer
+	// (nil until it has). See hproto.Tunnel.
+	Endpoint      string     `json:"endpoint,omitempty"`
+	AllowedIPs    []string   `json:"allowed_ips,omitempty"`
+	DNS           []string   `json:"dns,omitempty"`
+	MTU           int        `json:"mtu,omitempty"`
+	RxBytes       uint64     `json:"rx_bytes,omitempty"`
+	TxBytes       uint64     `json:"tx_bytes,omitempty"`
+	LastHandshake *time.Time `json:"last_handshake,omitempty"`
 	// Tenant is the one chosen for this session ("" = the server's choice
 	// for a person in one), and Tenants those last offered.
 	Tenant  string          `json:"tenant,omitempty"`
@@ -240,6 +252,8 @@ func (c *Core) Status() Status {
 		}
 		if t, ok := tunnels[e.URL]; ok {
 			s.Connected, s.Interface, s.AssignedIP = true, t.Interface, t.AssignedIP
+			s.Endpoint, s.AllowedIPs, s.DNS, s.MTU = t.Endpoint, t.AllowedIPs, t.DNS, t.MTU
+			s.RxBytes, s.TxBytes, s.LastHandshake = t.RxBytes, t.TxBytes, t.LastHandshake
 			if t.Tenant != "" {
 				s.Tenant = t.Tenant
 			}

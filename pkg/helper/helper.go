@@ -102,6 +102,12 @@ type Tunnel interface {
 	Close() error
 }
 
+// Informer is a Tunnel that can report its live state (*wgtun.Tunnel does).
+// A Tunnel that is not one is reported from what it was configured with.
+type Informer interface {
+	Info() (wgtun.Info, error)
+}
+
 // Server answers the app.
 type Server struct {
 	cfg           Config
@@ -148,6 +154,7 @@ type session struct {
 	spec     hproto.ConnectSpec // Bearer is replaced by ActionRenew
 	pub      wgtypes.Key
 	tun      Tunnel
+	cfg      wgtun.Config // what the tunnel was brought up with
 	assigned string
 	lease    time.Time
 	// renewBy is when the renewal is due; wake tells the loop it moved.
@@ -503,7 +510,7 @@ func (s *Server) enroll(spec *hproto.ConnectSpec, gen uint64, member *exclusive.
 	sctx, scancel := context.WithCancel(context.Background())
 	sess := &session{
 		gen: s.gen, server: server, member: *member, spec: *spec, pub: pair.Public,
-		tun: tun, assigned: resp.AssignedIP, wake: make(chan struct{}, 1), cancel: scancel,
+		tun: tun, cfg: cfg, assigned: resp.AssignedIP, wake: make(chan struct{}, 1), cancel: scancel,
 	}
 	s.setLeaseLocked(sess, resp.LeaseExpiresAt)
 	s.sessions[server] = sess
@@ -733,24 +740,67 @@ func (s *Server) stopLocked(server string) *session {
 	return old
 }
 
+// status is read-only. It answers whoever may use the helper's socket, as
+// ActionStatus always has: every live tunnel of the machine is listed -- there
+// is one set of tunnels, not one per user -- with what is configured and the
+// device's counters. No key, bearer or other secret is among it.
 func (s *Server) status() hproto.Response {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	resp := hproto.Response{OK: true}
+	type live struct {
+		tun Tunnel
+		idx int
+	}
+	var lives []live
 	for _, server := range slices.Sorted(maps.Keys(s.sessions)) {
 		sess := s.sessions[server]
 		t := hproto.Tunnel{
 			ServerURL: server, ServerName: sess.member.Name, Exclusive: sess.member.Exclusive,
 			Interface: sess.tun.Name(), AssignedIP: sess.assigned, Tenant: sess.spec.Tenant,
+			Endpoint: sess.cfg.Endpoint, AllowedIPs: slices.Clone(sess.cfg.AllowedIPs),
+			DNS: slices.Clone(sess.cfg.DNS), MTU: sess.cfg.MTU,
 		}
 		if !sess.lease.IsZero() {
 			lease := sess.lease
 			t.LeaseExpiresAt = &lease
 		}
+		lives = append(lives, live{sess.tun, len(resp.Tunnels)})
 		resp.Tunnels = append(resp.Tunnels, t)
 	}
 	if len(s.lastErrs) > 0 {
 		resp.LastErrors = maps.Clone(s.lastErrs)
+	}
+	s.mu.Unlock()
+	// The device is asked outside the lock: a status poll must not hold up a
+	// connect or a renewal.
+	for _, l := range lives {
+		inf, ok := l.tun.(Informer)
+		if !ok {
+			continue
+		}
+		in, err := inf.Info()
+		if err != nil { // polled every second: logged below warning level
+			s.log.Debug("tunnel info", "interface", resp.Tunnels[l.idx].Interface, "err", err)
+			continue
+		}
+		t := &resp.Tunnels[l.idx]
+		if in.Endpoint != "" {
+			t.Endpoint = in.Endpoint
+		}
+		if in.AllowedIPs != nil {
+			t.AllowedIPs = in.AllowedIPs
+		}
+		if in.DNS != nil {
+			t.DNS = in.DNS
+		}
+		if in.MTU != 0 {
+			t.MTU = in.MTU
+		}
+		t.RxBytes, t.TxBytes = in.RxBytes, in.TxBytes
+		if !in.LastHandshake.IsZero() {
+			hs := in.LastHandshake
+			t.LastHandshake = &hs
+		}
 	}
 	return resp
 }

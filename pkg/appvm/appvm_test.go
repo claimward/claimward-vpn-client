@@ -206,6 +206,13 @@ func TestHeadlinesAndTexts(t *testing.T) {
 		got.TenantOptions, c.want.TenantOptions = nil, nil
 		got.ConfigPath = ""
 		got.Servers, got.ProviderOptions = nil, nil
+		if c.name == "up" {
+			// The tunnel's facts have their own test.
+			if got.Tunnel == nil || got.Tunnel.Interface != "wg0" || got.Tunnel.Address != "10.0.0.2" {
+				t.Errorf("up: tunnel %+v", got.Tunnel)
+			}
+			got.Tunnel = nil
+		}
 		if c.name != "up" {
 			got.TenantLocked = false
 		}

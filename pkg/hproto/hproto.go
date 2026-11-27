@@ -128,6 +128,22 @@ type Tunnel struct {
 	Tenant     string `json:"tenant,omitempty"`
 	// LeaseExpiresAt is when the server removes the peer unless renewed.
 	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+
+	// What follows is read-only status of the tunnel; no key is among it.
+	// Endpoint is the peer's host:port, AllowedIPs the CIDRs routed into the
+	// tunnel (they change with a route push), DNS the servers the server
+	// assigned and MTU the interface's.
+	Endpoint   string   `json:"endpoint,omitempty"`
+	AllowedIPs []string `json:"allowed_ips,omitempty"`
+	DNS        []string `json:"dns,omitempty"`
+	MTU        int      `json:"mtu,omitempty"`
+	// RxBytes is what this device has received from the peer and TxBytes what
+	// it has sent, since the tunnel came up, as the device counts them.
+	RxBytes uint64 `json:"rx_bytes"`
+	TxBytes uint64 `json:"tx_bytes"`
+	// LastHandshake is the last completed handshake with the peer; absent
+	// until there has been one.
+	LastHandshake *time.Time `json:"last_handshake,omitempty"`
 }
 
 // Response is returned by the helper.
