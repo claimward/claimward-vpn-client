@@ -218,6 +218,13 @@ approval.
 App API (`pkg/helperclient`): `Approve(url, authorization)`, `ApproveElevated(url)`,
 `Revoke(url)`, `Approved()`.
 
+Refusals are typed, on every call: a helper refusal that has no more specific
+type is a `*helperclient.RefusalError` carrying the helper's `error_code`
+(`errors.As`, then `Code`), and `helperclient.CodeOf(err)` gives the code of any
+refusal (`tunnel_not_owned`, `caller_not_identified`, `server_not_approved`,
+and so on; empty when the helper gave none). Never match the message: it is for
+people and may be reworded. The message text is unchanged (`helper: <text>`).
+
 A route watch (`pkg/routeclient`) carries the bearer token, so it runs over
 **TLS** except to a loopback address. Against a server whose gRPC is not TLS,
 the handshake fails before the token is sent, and the tunnel stays up
