@@ -241,6 +241,32 @@ func TestTheAddressSurvivesAnAppRestart(t *testing.T) {
 	}
 }
 
+// The tunnel's facts the helper reports reach the server's status, apart from
+// the address: its interface, the peer's endpoint and the routes.
+func TestTheStatusCarriesTheTunnelsFacts(t *testing.T) {
+	c, _, url := world(t)
+	if _, err := c.Tenants(context.Background(), url); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetTenant(url, "hpc"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Connect(context.Background(), url); err != nil {
+		t.Fatal(err)
+	}
+	st := only(t, c, url)
+	if st.Interface != "utun9" || st.AssignedIP != "10.80.0.7/32" || st.Endpoint != "vpn.example.org:51820" ||
+		len(st.AllowedIPs) == 0 || st.AllowedIPs[0] != "10.2.0.0/16" {
+		t.Errorf("status %+v", st)
+	}
+	if err := c.Disconnect(context.Background(), url); err != nil {
+		t.Fatal(err)
+	}
+	if st := only(t, c, url); st.Endpoint != "" || st.AllowedIPs != nil || st.RxBytes != 0 || st.LastHandshake != nil {
+		t.Errorf("facts of a tunnel that is down: %+v", st)
+	}
+}
+
 // A server that is not one the person added is not asked about.
 func TestAnUnknownServerIsRefused(t *testing.T) {
 	c, _, _ := world(t)

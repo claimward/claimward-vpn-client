@@ -96,6 +96,37 @@ type ServerRow struct {
 	LoggedIn  bool   `json:"logged_in"`
 	Connected bool   `json:"connected"`
 	Selected  bool   `json:"selected"`
+	// Tunnel is the row's live tunnel, nil while it is not connected.
+	Tunnel *TunnelInfo `json:"tunnel"`
+}
+
+// TunnelInfo is one live tunnel's facts, for a WireGuard-style detail panel:
+// the Interface section (Interface, Address, DNS, MTU) and the Peer section
+// (Endpoint, AllowedIPs, LastHandshake, RxBytes, TxBytes). Every field is
+// read-only and may be empty: a view hides what is.
+type TunnelInfo struct {
+	Interface  string   `json:"interface"`
+	Address    string   `json:"address"` // the assigned address alone, in CIDR form
+	Endpoint   string   `json:"endpoint"`
+	AllowedIPs []string `json:"allowed_ips"`
+	DNS        []string `json:"dns"`
+	MTU        int      `json:"mtu"`
+	RxBytes    uint64   `json:"rx_bytes"`
+	TxBytes    uint64   `json:"tx_bytes"`
+	// LastHandshake is nil until the peer has completed one.
+	LastHandshake *time.Time `json:"last_handshake"`
+}
+
+// tunnelInfo is the server's tunnel, nil when it has none.
+func tunnelInfo(s appcore.ServerStatus) *TunnelInfo {
+	if !s.Connected {
+		return nil
+	}
+	return &TunnelInfo{
+		Interface: s.Interface, Address: s.AssignedIP, Endpoint: s.Endpoint,
+		AllowedIPs: append([]string{}, s.AllowedIPs...), DNS: append([]string{}, s.DNS...), MTU: s.MTU,
+		RxBytes: s.RxBytes, TxBytes: s.TxBytes, LastHandshake: s.LastHandshake,
+	}
 }
 
 // TenantOption is one row of the tenant choice. The first row always has an
@@ -130,19 +161,22 @@ type Can struct {
 
 // State is everything a view shows, as plain values.
 type State struct {
-	Screen   Screen  `json:"screen"`
-	Headline string  `json:"headline"` // "Connected", "Signed out", ...
-	Account  string  `json:"account"`  // "Signed in as ..."
-	Address  string  `json:"address"`  // assigned address and interface
-	Tenant   string  `json:"tenant"`   // the session's tenant
-	Helper   string  `json:"helper"`   // whether the privileged helper answers
-	Server   string  `json:"server"`   // the selected server's URL
-	Problem  string  `json:"problem"`  // why the configuration is incomplete
-	Busy     string  `json:"busy"`     // what is in progress, or ""
-	Error    string  `json:"error"`    // the last action's failure or notice, or ""
-	Slot     Slot    `json:"slot"`
-	Actions  Actions `json:"actions"`
-	TrayText string  `json:"tray_text"` // the tray menu's status line
+	Screen   Screen `json:"screen"`
+	Headline string `json:"headline"` // "Connected", "Signed out", ...
+	Account  string `json:"account"`  // "Signed in as ..."
+	Address  string `json:"address"`  // assigned address and interface
+	// Tunnel is the selected server's live tunnel, nil while it is not
+	// connected: the same value as its ServerRow's.
+	Tunnel   *TunnelInfo `json:"tunnel"`
+	Tenant   string      `json:"tenant"`  // the session's tenant
+	Helper   string      `json:"helper"`  // whether the privileged helper answers
+	Server   string      `json:"server"`  // the selected server's URL
+	Problem  string      `json:"problem"` // why the configuration is incomplete
+	Busy     string      `json:"busy"`    // what is in progress, or ""
+	Error    string      `json:"error"`   // the last action's failure or notice, or ""
+	Slot     Slot        `json:"slot"`
+	Actions  Actions     `json:"actions"`
+	TrayText string      `json:"tray_text"` // the tray menu's status line
 
 	Connected bool `json:"connected"`
 	LoggedIn  bool `json:"logged_in"`
@@ -790,8 +824,9 @@ func (m *Model) snapshot() State {
 		Servers:       []ServerRow{},
 	}
 	for i, r := range g.Servers {
-		row := ServerRow{URL: r.URL, Name: rowName(r), Exclusive: r.Exclusive, LoggedIn: r.LoggedIn, Connected: r.Connected, Selected: r.URL == st.URL}
+		row := ServerRow{URL: r.URL, Name: rowName(r), Exclusive: r.Exclusive, LoggedIn: r.LoggedIn, Connected: r.Connected, Selected: r.URL == st.URL, Tunnel: tunnelInfo(r)}
 		if row.Selected {
+			s.Tunnel = row.Tunnel
 			s.ServerIndex = i
 		}
 		s.Servers = append(s.Servers, row)
