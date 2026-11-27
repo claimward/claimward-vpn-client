@@ -33,6 +33,11 @@ type Config struct {
 	DNS             []string // optional
 	MTU             int      // 0 = default
 	Keepalive       int      // seconds, 0 = disabled
+	// Name is the key the interface is named after (the server's canonical
+	// URL): the same key always gets the same interface name, and two keys
+	// get two names, so tunnels to several servers can be up at once. See
+	// InterfaceName. Ignored on macOS, where the kernel numbers utunN.
+	Name string
 }
 
 // Tunnel is a running tunnel. Close it to tear everything down.
@@ -125,6 +130,27 @@ func renderRoutes(pub wgtypes.Key, allowedIPs []string) (string, []string, error
 	return b.String(), ips, nil
 }
 
+// freeName clears the way for an interface of that name: a leftover that
+// cannot be removed is an error, not something to create over.
+func freeName(name string, remove func(string) error) error {
+	if err := remove(name); err != nil {
+		return fmt.Errorf("remove stale interface %s: %w", name, err)
+	}
+	return nil
+}
+
+// createTUN makes the device after clearing its name with remove.
+func createTUN(name string, mtu int, remove func(string) error) (tun.Device, error) {
+	if err := freeName(name, remove); err != nil {
+		return nil, err
+	}
+	dev, err := tun.CreateTUN(name, mtu)
+	if err != nil {
+		return nil, fmt.Errorf("create tun device (need root?): %w", err)
+	}
+	return dev, nil
+}
+
 // Up creates the interface, configures WireGuard, and applies addressing/routes.
 func Up(cfg Config) (*Tunnel, error) {
 	if _, err := renderUAPI(cfg); err != nil {
@@ -134,9 +160,10 @@ func Up(cfg Config) (*Tunnel, error) {
 	cfg.AllowedIPs = ips
 	cfg.MTU = pathmtu.Fit(clampMTU(cfg.MTU), cfg.Endpoint)
 	mtu := cfg.MTU
-	tunDev, err := tun.CreateTUN(tunName, mtu)
+	ifName := InterfaceName(cfg.Name)
+	tunDev, err := createTUN(ifName, mtu, removeStale)
 	if err != nil {
-		return nil, fmt.Errorf("create tun device (need root?): %w", err)
+		return nil, err
 	}
 	name, err := tunDev.Name()
 	if err != nil {

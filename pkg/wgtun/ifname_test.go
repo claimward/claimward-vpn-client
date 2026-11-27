@@ -1,0 +1,106 @@
+package wgtun
+
+import (
+	"errors"
+	"os"
+	"runtime"
+	"strings"
+	"testing"
+
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+)
+
+func TestLinuxIfNameFitsAndIsDeterministic(t *testing.T) {
+	keys := []string{"", "https://vpn.example.org", "https://vpn.example.org/",
+		strings.Repeat("https://very-long-host.example.org/", 50), "http://127.0.0.1:8080", "é\n\x00"}
+	seen := map[string]string{}
+	for _, k := range keys {
+		n := linuxIfName(k)
+		if len(n) > linuxIfNameMax {
+			t.Errorf("%q: %q is %d bytes, IFNAMSIZ-1 is %d", k, n, len(n), linuxIfNameMax)
+		}
+		if !strings.HasPrefix(n, "cw-") {
+			t.Errorf("%q: %q has no cw- prefix", k, n)
+		}
+		if n != linuxIfName(k) {
+			t.Errorf("%q: not deterministic", k)
+		}
+		if other, dup := seen[n]; dup {
+			t.Errorf("%q and %q share %q", k, other, n)
+		}
+		seen[n] = k
+		if strings.ContainsAny(n, "/ \n\x00") {
+			t.Errorf("%q: unsafe name %q", k, n)
+		}
+	}
+}
+
+func TestWindowsAdapterName(t *testing.T) {
+	a := windowsAdapterName("https://vpn.example.org")
+	if !strings.HasPrefix(a, "Claimward vpn.example.org ") {
+		t.Errorf("readable part: %q", a)
+	}
+	if a != windowsAdapterName("https://vpn.example.org") {
+		t.Error("not deterministic")
+	}
+	if a == windowsAdapterName("https://vpn.example.org:8443") {
+		t.Error("two keys, one name")
+	}
+	long := windowsAdapterName("https://" + strings.Repeat("a", 300) + ".org")
+	if len(long) > len("Claimward ")+windowsHostMax+1+6 {
+		t.Errorf("unbounded name: %d bytes", len(long))
+	}
+	odd := windowsAdapterName("https://ho\"st;rm.org")
+	if strings.ContainsAny(odd, "\";\\/") {
+		t.Errorf("unsafe characters survive: %q", odd)
+	}
+	// No readable part: the name is "Claimward" and the 6 hex, nothing between.
+	if got := windowsAdapterName(""); len(got) != len("Claimward ")+6 || strings.Contains(got, "  ") {
+		t.Errorf("empty key: %q", got)
+	}
+}
+
+func TestInterfaceNameIsPerPlatform(t *testing.T) {
+	if InterfaceName("https://a") == "" {
+		t.Error("empty name")
+	}
+}
+
+func TestFreeNameRefusesWhatCannotBeCleared(t *testing.T) {
+	var asked string
+	if err := freeName("cw-x", func(n string) error { asked = n; return nil }); err != nil || asked != "cw-x" {
+		t.Errorf("clear: %v %q", err, asked)
+	}
+	err := freeName("cw-x", func(string) error { return errors.New("busy") })
+	if err == nil || !strings.Contains(err.Error(), "cw-x") || !strings.Contains(err.Error(), "busy") {
+		t.Errorf("stuck: %v", err)
+	}
+}
+
+// Without privilege the kernel refuses the device, and Up says so rather than
+// carrying on with none.
+func TestUpWithoutPrivilegeFailsAtTheDevice(t *testing.T) {
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("needs an unprivileged process")
+	}
+	priv, _ := wgtypes.GeneratePrivateKey()
+	peer, _ := wgtypes.GeneratePrivateKey()
+	tun, err := Up(Config{PrivateKey: priv, ServerPublicKey: peer.PublicKey(),
+		Endpoint: "192.0.2.1:51820", AllowedIPs: []string{"10.200.0.0/16"},
+		Address: "10.201.0.5/32", Name: "https://a.example.org"})
+	if err == nil {
+		tun.Close()
+		t.Fatal("a tunnel came up without privilege")
+	}
+	if !strings.Contains(err.Error(), "create tun device") {
+		t.Errorf("error: %v", err)
+	}
+}
+
+// A name that cannot be cleared stops createTUN before any device is made.
+func TestCreateTUNStopsAtAStuckName(t *testing.T) {
+	dev, err := createTUN("cw-x", 1380, func(string) error { return errors.New("busy") })
+	if err == nil || dev != nil || !strings.Contains(err.Error(), "stale interface cw-x") {
+		t.Errorf("stuck name: %v %v", dev, err)
+	}
+}

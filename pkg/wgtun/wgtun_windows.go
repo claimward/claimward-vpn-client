@@ -12,13 +12,17 @@ import (
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 )
 
-// tunName is the Wintun adapter's name, which is what Windows shows the
-// person in its network settings.
+// InterfaceName is the Wintun adapter's name, which is what Windows shows the
+// person in its network settings: "Claimward <host> <hash>", one per server.
 //
 // The adapter is Wintun's: wireguard-go's tun.CreateTUN loads wintun.dll,
 // which must sit beside the executable (https://www.wintun.net, signed by
 // WireGuard LLC). It is not bundled here; each app ships it.
-const tunName = "Claimward"
+func InterfaceName(key string) string { return windowsAdapterName(key) }
+
+// removeStale: Wintun's CreateTUN is not asked to replace an adapter; whether
+// it reuses a leftover of that name is exercised by the Windows CI test.
+func removeStale(string) error { return nil }
 
 // luid is the adapter's interface LUID, what every winipcfg call is keyed on.
 func (t *Tunnel) luid() (winipcfg.LUID, error) {
