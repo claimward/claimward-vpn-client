@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/claimward/claimward-vpn-client/pkg/exclusive"
@@ -164,5 +165,25 @@ func TestTransportFailuresAndWording(t *testing.T) {
 		if _, err := (&Client{SocketPath: path}).ApproveElevated("https://a"); err == nil || err.Error() != "this platform has no elevated socket" {
 			t.Errorf("elevated: %v", err)
 		}
+	}
+}
+
+func TestAvailableAndUnreachable(t *testing.T) {
+	c := fakeHelper(t, hproto.Response{OK: true})
+	if !c.Available() {
+		t.Error("a listening helper is not available")
+	}
+	dir, derr := os.MkdirTemp("", "hcl")
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	gone := &Client{SocketPath: filepath.Join(dir, "x")}
+	if gone.Available() {
+		t.Error("a missing socket is available")
+	}
+	_, err := gone.Status()
+	if err == nil || !strings.Contains(err.Error(), "helper not reachable") || !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("unreachable: %v", err)
 	}
 }
