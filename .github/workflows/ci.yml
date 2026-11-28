@@ -136,6 +136,38 @@ jobs:
           grep -q -e '--- PASS: TestDefaultPeerSourceReadsTheKernelsCredentials' peer.txt
       - run: go test -count=1 ./pkg/helper
 
+  # LOCAL_PEERCRED on FreeBSD (the same peer_bsd.go as macOS, a different
+  # kernel). The test binary is cross-compiled here, where the Go toolchain is
+  # pinned, and run inside a FreeBSD VM, which needs no Go of its own.
+  freebsd:
+    name: freebsd (peer credentials)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.4'
+      - run: CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go vet ./pkg/helper
+      - run: CGO_ENABLED=0 GOOS=freebsd GOARCH=amd64 go test -c -o pkg/helper/helper.test ./pkg/helper
+      - name: Peer tests in a FreeBSD VM (a skip is a failure here)
+        uses: vmactions/freebsd-vm@v1.6.0
+        with:
+          release: '14.3'
+          usesh: true
+          sync: rsync
+          copyback: false
+          run: |
+            cd pkg/helper
+            uname -sr
+            ./helper.test -test.count=1 -test.v -test.run 'DefaultPeerSource|Owner|Unidentified|CannotIdentify|Elevated|Status' > peer.txt 2>&1
+            rc=$?
+            cat peer.txt
+            if [ $rc -ne 0 ]; then echo 'the peer tests failed'; exit 1; fi
+            if grep -q -e '--- SKIP' peer.txt; then echo 'a peer test was skipped'; exit 1; fi
+            grep -q -e '--- PASS: TestDefaultPeerSourceReadsTheKernelsCredentials' peer.txt
+            grep -q -e '--- PASS: TestDefaultPeerSourceRefusesAnUnconnectedSocket' peer.txt
+            ./helper.test -test.count=1
+
   # The Windows parts run on Windows: the helper's ACLs set and read back
   # through the file system, and a real Wintun adapter brought up and its
   # address, routes, DNS and MTU read back from the IP Helper API. The
